@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
-export function PageHeader({ title, description, actions }: { title: string; description?: string; actions?: ReactNode }) {
+export function PageHeader({ title, description, actions }: { title: string; description?: string | undefined; actions?: ReactNode }) {
   return (
     <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
@@ -31,7 +31,7 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="py-6 text-center text-sm text-muted-foreground">{children}</p>;
 }
 
-export function Stat({ label, value, hint, tone, onClick }: { label: string; value: ReactNode; hint?: string; tone?: "danger" | "warn" | "ok"; onClick?: () => void }) {
+export function Stat({ label, value, hint, tone, onClick }: { label: string; value: ReactNode; hint?: string | undefined; tone?: "danger" | "warn" | "ok" | undefined; onClick?: (() => void) | undefined }) {
   const toneCls = tone === "danger" ? "text-destructive" : tone === "warn" ? "text-warning-foreground" : tone === "ok" ? "text-success" : "";
   const Comp = onClick ? "button" : "div";
   return (

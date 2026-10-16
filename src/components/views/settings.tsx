@@ -1,0 +1,38 @@
+import { useStore } from "@/lib/store";
+import { Panel } from "@/components/pp/page";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+
+export function SettingsView() {
+  const { data, updateSettings, backend, checkBackend, resetDemo } = useStore();
+  const s = data.settings;
+  const num = (k: keyof typeof s.reminders) => (
+    <div key={k} className="space-y-1"><Label>{k}</Label><Input type="number" min={1} value={s.reminders[k]} onChange={(e) => updateSettings({ ...s, reminders: { ...s.reminders, [k]: Math.max(1, Number(e.target.value) || 1) } })} /></div>
+  );
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Panel title="Organization">
+        <Label>Name</Label><Input value={s.orgName} onChange={(e) => updateSettings({ ...s, orgName: e.target.value })} />
+        <div className="mt-3 flex items-center gap-2"><Switch checked={s.demoMode} onCheckedChange={(c) => updateSettings({ ...s, demoMode: c })} /> Demo mode</div>
+        <Button className="mt-3" variant="outline" onClick={resetDemo}>Reset demo data</Button>
+      </Panel>
+      <Panel title="Backend & Telegram integration">
+        <Label>Backend base URL</Label>
+        <Input placeholder="https://api.example.com" value={s.backendUrl} onChange={(e) => updateSettings({ ...s, backendUrl: e.target.value })} />
+        <div className="mt-2 text-sm">Status: {backend.state === "ok" ? `Connected · Telegram ${backend.health.telegram.configured ? "configured" : "not configured"}` : backend.state === "error" ? `Error — ${backend.error}` : backend.state === "checking" ? "Checking…" : "Awaiting setup"}</div>
+        <Button className="mt-2" size="sm" variant="outline" onClick={() => void checkBackend()}>Re-check</Button>
+        <p className="mt-2 text-xs text-muted-foreground">Bot tokens and AI keys are stored only on the backend — never entered here. See README for the API contract.</p>
+      </Panel>
+      <Panel title="Reminder thresholds">
+        <div className="grid grid-cols-2 gap-3">{(Object.keys(s.reminders) as (keyof typeof s.reminders)[]).map(num)}</div>
+      </Panel>
+      <Panel title="Escalation rules (require backend scheduling)">
+        {(Object.keys(s.escalation) as (keyof typeof s.escalation)[]).map((k) => (
+          <div key={k} className="flex items-center gap-2 py-1 text-sm"><Switch checked={s.escalation[k]} onCheckedChange={(c) => updateSettings({ ...s, escalation: { ...s.escalation, [k]: c } })} />{k}</div>
+        ))}
+      </Panel>
+    </div>
+  );
+}
