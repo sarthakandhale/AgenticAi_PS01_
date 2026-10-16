@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -13,10 +13,43 @@ import { ActivityList } from "./activity-list";
 import { RequestUpdateButton } from "./request-update";
 
 export function TaskSheet() {
-  const { data, openTaskId, setOpenTaskId, setStatus, deleteTask, openTaskDialog } = useStore();
+  const { data, openTaskId, setOpenTaskId, setStatus, deleteTask, openTaskDialog, refreshTask, backend, coordinatorApiKey } = useStore();
+  const backendReady = backend.state === "ok" && !!coordinatorApiKey && !!backend.health.coordinatorAuth?.configured;
   const { member, project, task: getTask } = useLookup();
   const [confirmDel, setConfirmDel] = useState(false);
+  const refreshTaskRef = useRef(refreshTask);
+  const pollErrorShown = useRef(false);
+  const refreshInFlight = useRef(false);
   const t = openTaskId ? getTask(openTaskId) : undefined;
+
+  useEffect(() => {
+    refreshTaskRef.current = refreshTask;
+  }, [refreshTask]);
+
+  useEffect(() => {
+    if (!openTaskId || !backendReady) return;
+    let active = true;
+    const refresh = () => {
+      if (refreshInFlight.current) return;
+      refreshInFlight.current = true;
+      void refreshTaskRef.current(openTaskId).then(() => {
+        pollErrorShown.current = false;
+      }).catch((error) => {
+        if (active && !pollErrorShown.current) {
+          pollErrorShown.current = true;
+          toast.error(`Live task refresh failed: ${(error as Error).message}`);
+        }
+      }).finally(() => {
+        refreshInFlight.current = false;
+      });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [openTaskId, backendReady]);
 
   return (
     <Sheet open={!!t} onOpenChange={(o) => !o && setOpenTaskId(null)}>
@@ -34,6 +67,7 @@ export function TaskSheet() {
             </SheetHeader>
             <div className="space-y-5 px-4 pb-6 text-sm">
               {t.description && <p className="text-muted-foreground">{t.description}</p>}
+              {t.acceptanceCriteria?.length ? <div><div className="mb-1 text-xs text-muted-foreground">Acceptance criteria</div><ul className="list-disc space-y-1 pl-5">{t.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul></div> : null}
               <dl className="grid grid-cols-2 gap-3">
                 <div><dt className="text-xs text-muted-foreground">Owner</dt><dd>{member(t.ownerId)?.name ?? "Unassigned"}</dd></div>
                 <div><dt className="text-xs text-muted-foreground">Team</dt><dd>{t.team}</dd></div>
@@ -64,11 +98,19 @@ export function TaskSheet() {
                 {downstream(data.tasks, t.id).length === 0 && <span className="text-muted-foreground">None</span>}
               </div>
               <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-                <Select value={t.status} onValueChange={(v) => { setStatus(t.id, v as TaskStatus); toast.success(`Status set to ${v}`); }}>
+                <Select value={t.status} onValueChange={(v) => {
+                  if (v === "Blocked" && t.status !== "Blocked") {
+                    toast.error("Edit the task to provide a blocker description.");
+                    return;
+                  }
+                  setStatus(t.id, v as TaskStatus);
+                  toast.success(`Status set to ${v}`);
+                }}>
                   <SelectTrigger className="w-40" aria-label="Change status"><SelectValue /></SelectTrigger>
                   <SelectContent>{STATUSES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
                 </Select>
                 <RequestUpdateButton task={t} />
+                {backendReady && <Button size="sm" variant="outline" onClick={() => void refreshTask(t.id).then(() => toast.success("Task refreshed from backend")).catch((error) => toast.error((error as Error).message))}><RefreshCw className="h-3.5 w-3.5" /> Refresh</Button>}
                 <Button size="sm" variant="outline" onClick={() => openTaskDialog(t)}><Pencil className="h-3.5 w-3.5" /> Edit</Button>
                 <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(true)}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>
               </div>

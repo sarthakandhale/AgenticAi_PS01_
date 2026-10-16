@@ -8,13 +8,13 @@ import { useLookup, useStore } from "@/lib/store";
 import type { Task } from "@/lib/types";
 
 export function RequestUpdateButton({ task, size = "sm" }: { task: Task; size?: "sm" | "default" }) {
-  const { requestUpdate, backend, data } = useStore();
+  const { requestUpdate, backend, coordinatorApiKey, data } = useStore();
   const { member } = useLookup();
   const owner = member(task.ownerId);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState("");
-  const live = backend.state === "ok";
+  const live = backend.state === "ok" && !!coordinatorApiKey && !!backend.health.coordinatorAuth?.configured;
 
   const openIt = () => {
     setText(`Hi ${owner?.name.split(" ")[0] ?? "there"}, could you share a quick update on "${task.title}" (due ${task.deadline})? Is it in progress, complete, or blocked by anything?`);

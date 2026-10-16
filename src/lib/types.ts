@@ -10,6 +10,8 @@ export interface Member {
   department: string;
   /** Whether a Telegram chat is linked on the backend. Demo data is always false. */
   telegramLinked: boolean;
+  /** True for participants created and managed through the configured backend. */
+  backendParticipant?: boolean;
 }
 
 export interface Milestone {
@@ -49,6 +51,7 @@ export interface Task {
   deadline: string;
   priority: Priority;
   status: TaskStatus;
+  acceptanceCriteria?: string[];
   dependsOn: string[];
   blocker?: Blocker;
   nextAction: string;

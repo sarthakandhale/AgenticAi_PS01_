@@ -24,7 +24,7 @@ const schema = z.object({
 });
 
 export function TaskDialog() {
-  const { data, taskDialog, closeTaskDialog, saveTask, selectedProjectId } = useStore();
+  const { data, taskDialog, closeTaskDialog, saveTask, selectedProjectId, backend, coordinatorApiKey } = useStore();
   const editing = taskDialog.task;
   const blank = (): Task => ({
     id: `t${Date.now().toString(36)}`,
@@ -36,11 +36,13 @@ export function TaskDialog() {
   const [f, setF] = useState<Task>(blank);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [blockReason, setBlockReason] = useState("");
+  const [criteriaText, setCriteriaText] = useState("");
 
   useEffect(() => {
     if (taskDialog.open) {
       setF(editing ?? blank());
       setBlockReason(editing?.blocker?.reason ?? "");
+      setCriteriaText(editing?.acceptanceCriteria?.join("\n") ?? "");
       setErrors({});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -57,7 +59,11 @@ export function TaskDialog() {
     if (wouldCreateCycle(data.tasks, f.id, f.dependsOn)) errs["dependsOn"] = "These dependencies would create a circular chain";
     setErrors(errs);
     if (Object.keys(errs).length) return;
-    const task: Task = { ...f, title: f.title.trim() };
+    const task: Task = {
+      ...f,
+      title: f.title.trim(),
+      acceptanceCriteria: criteriaText.split("\n").map((line) => line.trim()).filter(Boolean),
+    };
     if (f.status === "Blocked") task.blocker = { ...(f.blocker ?? { identifiedAt: new Date().toISOString() }), reason: blockReason.trim() };
     saveTask(task, !editing);
     toast.success(editing ? "Task updated" : "Task created");
@@ -65,6 +71,8 @@ export function TaskDialog() {
   };
 
   const err = (k: string) => errors[k] && <p className="text-xs text-destructive">{errors[k]}</p>;
+  const backendIsAuthorized = backend.state === "ok" && !!coordinatorApiKey && !!backend.health.coordinatorAuth?.configured;
+  const availableOwners = backendIsAuthorized ? data.members.filter((member) => member.backendParticipant) : data.members;
 
   return (
     <Dialog open={taskDialog.open} onOpenChange={(o) => !o && closeTaskDialog()}>
@@ -94,8 +102,9 @@ export function TaskDialog() {
             <Label>Owner</Label>
             <Select value={f.ownerId} onValueChange={(v) => setF((p) => ({ ...p, ownerId: v, team: p.team || data.members.find((m) => m.id === v)?.department || "" }))}>
               <SelectTrigger><SelectValue placeholder="Select team member" /></SelectTrigger>
-              <SelectContent>{data.members.map((m) => <SelectItem key={m.id} value={m.id}>{m.name} — {m.role}</SelectItem>)}</SelectContent>
+              <SelectContent>{availableOwners.map((m) => <SelectItem key={m.id} value={m.id}>{m.name} — {m.role}</SelectItem>)}</SelectContent>
             </Select>
+            {backendIsAuthorized && availableOwners.length === 0 && <p className="text-xs text-muted-foreground">Register this project participant on the Team page first.</p>}
             {err("ownerId")}
           </div>
           <div className="space-y-1.5">
@@ -132,6 +141,10 @@ export function TaskDialog() {
           <div className="space-y-1.5 sm:col-span-2">
             <Label htmlFor="t-next">Next action</Label>
             <Input id="t-next" value={f.nextAction} onChange={(e) => set("nextAction", e.target.value)} />
+          </div>
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label htmlFor="t-criteria">Acceptance criteria (one per line)</Label>
+            <Textarea id="t-criteria" rows={3} value={criteriaText} onChange={(e) => setCriteriaText(e.target.value)} />
           </div>
           <div className="space-y-1.5 sm:col-span-2">
             <Label>Depends on (same project)</Label>
