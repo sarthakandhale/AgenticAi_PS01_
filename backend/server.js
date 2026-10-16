@@ -1,4 +1,10 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __serverDir = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__serverDir, ".env") });
+dotenv.config();
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { timingSafeEqual } from "node:crypto";
@@ -18,6 +24,7 @@ import {
   listTaskEvents,
   listTaskMessages,
   listTasks,
+  listAllEvents,
   listParticipants,
   getProjectReport,
   recordOutboundMessage,
@@ -253,6 +260,13 @@ app.get("/api/tasks/:id/events", async (req, res) => {
 app.get("/api/tasks/:id/messages", async (req, res) => {
   const id = validate(z.string().min(1).max(80), req.params.id);
   res.json({ messages: await listTaskMessages(id) });
+});
+
+app.get("/api/events", async (req, res) => {
+  const projectId = req.query.project_id
+    ? validate(z.string().min(1).max(80), req.query.project_id)
+    : undefined;
+  res.json({ events: await listAllEvents(projectId) });
 });
 
 app.post("/api/participants", async (req, res) => {

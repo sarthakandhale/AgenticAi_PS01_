@@ -78,7 +78,7 @@ function taskPayload(row, projectClientId = null) {
   };
 }
 
-async function resolveProjectDbId(value, db = requireDatabase()) {
+export async function resolveProjectDbId(value, db = requireDatabase()) {
   if (value == null) return null;
   const id = String(value);
   const { data: byClientId, error: clientError } = await db
@@ -98,7 +98,7 @@ async function resolveProjectDbId(value, db = requireDatabase()) {
   return data?.id ?? null;
 }
 
-async function resolveTaskDbId(value, db = requireDatabase()) {
+export async function resolveTaskDbId(value, db = requireDatabase()) {
   if (value == null) return null;
   const id = String(value);
   const { data: byClientId, error: clientError } = await db
@@ -373,33 +373,76 @@ export async function registerParticipant(input) {
   const code = randomBytes(18).toString("base64url");
   const codeHash = createHash("sha256").update(code).digest("hex");
   const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
-  const { data: participant, error } = await db
+
+  // Check if participant with matching display_name already exists to prevent duplicates
+  const { data: existingParticipant, error: searchError } = await db
     .from("participants")
-    .insert({
-      display_name: input.display_name,
-      role: input.role ?? "",
-      department: input.department ?? "",
-      telegram_link_code_hash: codeHash,
-      telegram_link_code_expires_at: expiresAt,
-    })
-    .select("id, display_name, role, department")
-    .single();
-  if (error) throw error;
-  const { error: memberError } = await db.from("project_members").insert({
-    project_id: projectDbId,
-    participant_id: participant.id,
-  });
-  if (memberError) {
-    const { error: cleanupError } = await db.from("participants").delete().eq("id", participant.id);
-    if (cleanupError) {
-      console.error("Could not roll back participant after membership failure:", cleanupError.message);
+    .select("id, display_name, role, department, telegram_user_id, telegram_chat_id, telegram_link_code_expires_at")
+    .eq("display_name", input.display_name.trim())
+    .maybeSingle();
+  if (searchError) throw searchError;
+
+  let participant = existingParticipant;
+  if (participant) {
+    const updateData = {
+      ...(input.role ? { role: input.role } : {}),
+      ...(input.department ? { department: input.department } : {}),
+      updated_at: new Date().toISOString(),
+    };
+    if (!participant.telegram_user_id) {
+      updateData.telegram_link_code_hash = codeHash;
+      updateData.telegram_link_code_expires_at = expiresAt;
     }
-    throw memberError;
+    const { data: updated, error: updateError } = await db
+      .from("participants")
+      .update(updateData)
+      .eq("id", participant.id)
+      .select("id, display_name, role, department, telegram_user_id")
+      .single();
+    if (updateError) throw updateError;
+    participant = updated;
+  } else {
+    const { data: created, error } = await db
+      .from("participants")
+      .insert({
+        display_name: input.display_name.trim(),
+        role: input.role ?? "",
+        department: input.department ?? "",
+        telegram_link_code_hash: codeHash,
+        telegram_link_code_expires_at: expiresAt,
+      })
+      .select("id, display_name, role, department, telegram_user_id")
+      .single();
+    if (error) throw error;
+    participant = created;
   }
+
+  // Ensure project membership exists
+  const { data: existingMember } = await db
+    .from("project_members")
+    .select("participant_id")
+    .eq("project_id", projectDbId)
+    .eq("participant_id", participant.id)
+    .maybeSingle();
+
+  if (!existingMember) {
+    const { error: memberError } = await db.from("project_members").insert({
+      project_id: projectDbId,
+      participant_id: participant.id,
+    });
+    if (memberError) {
+      console.error("Could not add project membership:", memberError.message);
+      throw memberError;
+    }
+  }
+
   return {
-    ...participant,
     id: asId(participant.id),
-    telegram_link_code: code,
+    display_name: participant.display_name,
+    role: participant.role ?? "",
+    department: participant.department ?? "",
+    telegram_linked: Boolean(participant.telegram_user_id),
+    telegram_link_code: participant.telegram_user_id ? null : code,
     expires_at: expiresAt,
   };
 }
@@ -661,3 +704,228 @@ export async function getProjectReport(projectId) {
     return result;
   }, { total: 0, TODO: 0, IN_PROGRESS: 0, BLOCKED: 0, COMPLETE: 0 });
 }
+
+export async function getParticipantContext(participantId, db = requireDatabase()) {
+  if (!participantId) return null;
+  const { data: participant, error } = await db
+    .from("participants")
+    .select("id, display_name, role, department, telegram_chat_id, telegram_user_id")
+    .eq("id", participantId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!participant) return null;
+
+  const { data: memberships, error: memberError } = await db
+    .from("project_members")
+    .select("project_id, projects(id, client_id, name, description)")
+    .eq("participant_id", participantId);
+  if (memberError) throw memberError;
+
+  const projects = (memberships || []).map((m) => ({
+    id: asId(m.projects?.client_id ?? m.projects?.id ?? m.project_id),
+    name: m.projects?.name ?? "",
+    description: m.projects?.description ?? "",
+  }));
+
+  return {
+    ...participant,
+    id: asId(participant.id),
+    projects,
+  };
+}
+
+export async function listAllEvents(projectId = null, limit = 50, db = requireDatabase()) {
+  let query = db.from("task_events").select("*").order("created_at", { ascending: false }).limit(limit);
+  if (projectId) {
+    const projectDbId = await resolveProjectDbId(projectId, db);
+    if (projectDbId) query = query.eq("project_id", projectDbId);
+  }
+  const { data, error } = await query;
+  if (error) throw error;
+  return data;
+}
+
+export async function checkAndTriggerDependencyHandoffs(
+  { completedTaskDbId, completerParticipantId },
+  db = requireDatabase(),
+  sendNotification = null,
+) {
+  if (completedTaskDbId == null) return [];
+
+  // 1. Fetch completed task
+  const { data: completedTask, error: taskError } = await db
+    .from("tasks")
+    .select("id, client_id, project_id, title, status")
+    .eq("id", completedTaskDbId)
+    .maybeSingle();
+  if (taskError) throw taskError;
+  if (!completedTask) return [];
+
+  const completedIds = [String(completedTask.id), completedTask.client_id].filter(Boolean);
+
+  // 2. Fetch completer name
+  let completerName = "a team member";
+  if (completerParticipantId) {
+    const { data: completer } = await db
+      .from("participants")
+      .select("display_name")
+      .eq("id", completerParticipantId)
+      .maybeSingle();
+    if (completer?.display_name) completerName = completer.display_name;
+  }
+
+  // 3. Find candidate downstream tasks that are open and have dependencies
+  const { data: candidates, error: candError } = await db
+    .from("tasks")
+    .select("id, client_id, project_id, title, owner_id, status, blocker, dependencies")
+    .neq("status", "complete")
+    .neq("status", "blocked");
+  if (candError) throw candError;
+
+  // Preload task statuses for prerequisite evaluation
+  const { data: allTaskStatuses, error: allStatusError } = await db
+    .from("tasks")
+    .select("id, client_id, status");
+  if (allStatusError) throw allStatusError;
+
+  const statusMap = new Map();
+  for (const row of allTaskStatuses || []) {
+    statusMap.set(String(row.id), row.status);
+    if (row.client_id) statusMap.set(String(row.client_id), row.status);
+  }
+
+  const triggeredHandoffs = [];
+
+  for (const downstream of candidates || []) {
+    const deps = downstream.dependencies || [];
+    if (!Array.isArray(deps) || deps.length === 0) continue;
+
+    // Check if downstream task explicitly depends on this completed task
+    const dependsOnThis = deps.some((dep) => completedIds.includes(String(dep)));
+    if (!dependsOnThis) continue;
+
+    // Check if ALL prerequisites are complete
+    const allPrereqsMet = deps.every((dep) => {
+      const depStatus = statusMap.get(String(dep));
+      return depStatus === "complete";
+    });
+
+    if (!allPrereqsMet) {
+      continue;
+    }
+
+    // Check downstream owner and Telegram link
+    if (!downstream.owner_id) continue;
+    const { data: assignee, error: assigneeError } = await db
+      .from("participants")
+      .select("id, display_name, telegram_chat_id, telegram_user_id")
+      .eq("id", downstream.owner_id)
+      .maybeSingle();
+    if (assigneeError) throw assigneeError;
+    if (!assignee?.telegram_chat_id) continue;
+
+    // Idempotency check: has handoff notification already been sent?
+    try {
+      const { data: existingHandoff } = await db
+        .from("handoff_notifications")
+        .select("id, status")
+        .eq("prerequisite_task_id", completedTask.id)
+        .eq("downstream_task_id", downstream.id)
+        .maybeSingle();
+
+      if (existingHandoff && existingHandoff.status === "SENT") {
+        continue;
+      }
+    } catch {
+      // Table may not exist in pure mock environments
+    }
+
+    const messageText = `Hi ${assignee.display_name}, the prerequisite task '${completedTask.title}' has been marked complete by ${completerName}. Your task '${downstream.title}' is now ready to begin. Please review the task details and share an update when you start.`;
+
+    const sendFn = sendNotification || (async (chatId, text) => {
+      const { sendTelegramMessage } = await import("./telegram.js");
+      return sendTelegramMessage(chatId, text);
+    });
+
+    let sentMessageId = null;
+    let deliveryStatus = "SENT";
+    let deliveryError = null;
+
+    try {
+      const sent = await sendFn(assignee.telegram_chat_id, messageText);
+      sentMessageId = sent?.message_id ?? null;
+    } catch (sendErr) {
+      deliveryStatus = "FAILED";
+      deliveryError = sendErr.message;
+      console.error(`Handoff Telegram delivery failed to participant ${assignee.id}:`, sendErr.message);
+    }
+
+    // Persist to handoff_notifications
+    try {
+      await db.from("handoff_notifications").upsert({
+        prerequisite_task_id: completedTask.id,
+        downstream_task_id: downstream.id,
+        recipient_participant_id: assignee.id,
+        telegram_message_id: sentMessageId,
+        status: deliveryStatus,
+        delivery_error: deliveryError,
+        created_at: new Date().toISOString(),
+      }, { onConflict: "prerequisite_task_id,downstream_task_id" });
+    } catch (saveError) {
+      console.warn("handoff_notifications record skipped:", saveError.message);
+    }
+
+    // Persist outbound telegram message record
+    if (deliveryStatus === "SENT") {
+      try {
+        await db.from("telegram_messages").insert({
+          direction: "OUTBOUND",
+          participant_id: assignee.id,
+          task_id: downstream.id,
+          telegram_message_id: sentMessageId,
+          message_text: messageText,
+          processing_status: "PROCESSED",
+        });
+      } catch (msgErr) {
+        console.warn("telegram_messages record skipped:", msgErr.message);
+      }
+    }
+
+    // Persist audit event in task_events
+    try {
+      await db.from("task_events").insert({
+        project_id: downstream.project_id,
+        task_id: downstream.id,
+        participant_id: assignee.id,
+        event_type: "dependency_handoff",
+        evidence: `Prerequisite "${completedTask.title}" completed by ${completerName}`,
+        analysis: {
+          prerequisiteTaskId: asId(completedTask.client_id ?? completedTask.id),
+          prerequisiteTitle: completedTask.title,
+          completedBy: completerName,
+          downstreamTaskId: asId(downstream.client_id ?? downstream.id),
+          downstreamTitle: downstream.title,
+          delivery: deliveryStatus,
+          ...(deliveryError ? { error: deliveryError } : {}),
+        },
+        previous_status: downstream.status,
+        next_status: downstream.status,
+      });
+    } catch (eventErr) {
+      console.warn("task_events record skipped:", eventErr.message);
+    }
+
+    triggeredHandoffs.push({
+      downstreamTaskId: downstream.id,
+      downstreamTitle: downstream.title,
+      recipientId: assignee.id,
+      recipientName: assignee.display_name,
+      deliveryStatus,
+      deliveryError,
+      messageText,
+    });
+  }
+
+  return triggeredHandoffs;
+}
+

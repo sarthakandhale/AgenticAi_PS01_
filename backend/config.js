@@ -1,4 +1,10 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __configDir = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__configDir, ".env") });
+dotenv.config();
 
 const requiredWhenSet = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
 const maxFollowupsPerDay = Number(process.env.MAX_FOLLOWUPS_PER_DAY || 5);

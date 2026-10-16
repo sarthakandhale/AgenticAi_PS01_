@@ -4,12 +4,15 @@ import { analyseReply } from "../agent.js";
 import {
   findFollowupForReply,
   getParticipantByTelegramId,
+  getParticipantContext,
   getParticipantReport,
   getParticipantTasks,
   linkTelegramAccount,
   markTelegramMessageFailed,
   recordReplyDecision,
   recordTelegramMessage,
+  resolveTaskDbId,
+  checkAndTriggerDependencyHandoffs,
 } from "./taskService.js";
 
 let bot;
@@ -79,9 +82,10 @@ async function handleText(ctx) {
         project_description: task.projects?.description ?? "",
       }))
     : await getParticipantTasks(participant.id);
+  const participantContext = await getParticipantContext(participant.id);
   let analysis;
   try {
-    analysis = await analyseReply(telegramMessage.text, tasks);
+    analysis = await analyseReply(telegramMessage.text, tasks, participantContext);
   } catch (error) {
     console.error("Telegram reply analysis failed:", error.message);
     await markTelegramMessageFailed(messageId, error.message, followup?.task_id);
@@ -111,11 +115,27 @@ async function handleText(ctx) {
     return;
   }
 
+  // Trigger dependency-aware task handoffs if task was completed
+  if (analysis.classification === "COMPLETE" && analysis.taskId) {
+    try {
+      const taskDbId = await resolveTaskDbId(analysis.taskId);
+      if (taskDbId) {
+        await checkAndTriggerDependencyHandoffs({
+          completedTaskDbId: taskDbId,
+          completerParticipantId: participant.id,
+        });
+      }
+    } catch (handoffErr) {
+      console.error("Dependency handoff trigger failed:", handoffErr.message);
+    }
+  }
+
   if (analysis.classification === "UNCLEAR") {
     await ctx.reply(
-      pendingFollowups.length > 1
+      analysis.clarificationQuestion ||
+      (pendingFollowups.length > 1
         ? `I couldn't tell which task you mean. Please reply directly to the task update message, or name the task.`
-        : "I couldn't confidently match that update to one task. Please mention the task title or ask your coordinator for help.",
+        : "I couldn't confidently match that update to one task. Please mention the task title or ask your coordinator for help."),
     );
     return;
   }

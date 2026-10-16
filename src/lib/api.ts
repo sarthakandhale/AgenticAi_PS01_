@@ -133,4 +133,8 @@ export const api = {
         project_members: Array<{ project_id: string }>;
       }>;
     }>(base, "/api/participants", undefined, key),
+  listTasks: (base: string, projectId?: string, key = "") =>
+    call<{ tasks: BackendTask[] }>(base, projectId ? `/api/tasks?project_id=${encodeURIComponent(projectId)}` : "/api/tasks", undefined, key),
+  listEvents: (base: string, projectId?: string, key = "") =>
+    call<{ events: BackendEvent[] }>(base, projectId ? `/api/events?project_id=${encodeURIComponent(projectId)}` : "/api/events", undefined, key),
 };
