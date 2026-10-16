@@ -29,6 +29,8 @@ import {
 import {
   getTelegramBotUsername,
   getTelegramPollingError,
+  handleTelegramUpdate,
+  isTelegramWebhookActive,
   isTelegramPolling,
   isTelegramPollingRetrying,
   sendTelegramMessage,
@@ -151,6 +153,9 @@ app.get("/api/health", (_req, res) => {
     telegram: {
       configured: Boolean(config.telegramToken && supabase),
       polling: isTelegramPolling(),
+      ...(config.telegramMode === "webhook"
+        ? { mode: "webhook", webhook: isTelegramWebhookActive() }
+        : {}),
       ...(isTelegramPollingRetrying() ? { polling_retrying: true } : {}),
       ...(getTelegramPollingError() ? { polling_error: getTelegramPollingError() } : {}),
       ...(getTelegramBotUsername() ? { bot_username: getTelegramBotUsername() } : {}),
@@ -159,6 +164,27 @@ app.get("/api/health", (_req, res) => {
     database: { configured: Boolean(supabase) },
     coordinatorAuth: { configured: Boolean(config.coordinatorApiKey) },
   });
+});
+
+app.post("/api/telegram/webhook", async (req, res) => {
+  const suppliedSecret = req.get("x-telegram-bot-api-secret-token") || "";
+  const expectedSecret = config.telegramWebhookSecret;
+  if (!expectedSecret) {
+    return res.status(503).json({ error: "Telegram webhook secret is not configured." });
+  }
+  const suppliedBuffer = Buffer.from(suppliedSecret);
+  const expectedBuffer = Buffer.from(expectedSecret);
+  if (
+    suppliedBuffer.length !== expectedBuffer.length ||
+    !timingSafeEqual(suppliedBuffer, expectedBuffer)
+  ) {
+    return res.status(401).json({ error: "Invalid Telegram webhook secret." });
+  }
+  if (!isTelegramWebhookActive()) {
+    return res.status(503).json({ error: "Telegram webhook is not ready." });
+  }
+  await handleTelegramUpdate(req.body);
+  res.sendStatus(200);
 });
 
 app.use("/api", (req, res, next) => {
@@ -296,7 +322,7 @@ export async function startServer() {
   if (supabase && config.telegramToken) {
     await startTelegramBot();
   } else if (config.telegramToken) {
-    console.warn("Telegram polling not started: configure Supabase first.");
+    console.warn("Telegram bot not started: configure Supabase first.");
   }
 
   const server = createServer(app);

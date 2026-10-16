@@ -15,6 +15,7 @@ import {
 let bot;
 let botUsername;
 let polling = false;
+let webhookActive = false;
 let pollingError;
 let pollingRetrying = false;
 let pollingRetryTimer;
@@ -190,6 +191,18 @@ export async function startTelegramBot() {
   botInstance.catch((error) => {
     console.error("Telegram update failed:", error.message);
   });
+  if (config.telegramMode === "webhook") {
+    if (!config.telegramWebhookUrl || !config.telegramWebhookSecret) {
+      throw new Error("TELEGRAM_WEBHOOK_URL and TELEGRAM_WEBHOOK_SECRET are required in webhook mode.");
+    }
+    await botInstance.api.setWebhook(config.telegramWebhookUrl, {
+      secret_token: config.telegramWebhookSecret,
+      allowed_updates: ["message"],
+    });
+    webhookActive = true;
+    console.info(`Telegram webhook configured for @${botUsername}.`);
+    return botInstance;
+  }
   const startPolling = () => {
     if (bot !== botInstance) return;
     pollingRetrying = false;
@@ -214,6 +227,17 @@ export async function startTelegramBot() {
   return botInstance;
 }
 
+export async function handleTelegramUpdate(update) {
+  if (!bot || !webhookActive) {
+    throw new Error("Telegram webhook is not ready.");
+  }
+  await bot.handleUpdate(update);
+}
+
+export function isTelegramWebhookActive() {
+  return webhookActive;
+}
+
 export function getTelegramBotUsername() {
   return botUsername;
 }
@@ -236,10 +260,12 @@ export async function stopTelegramBot() {
   pollingRetrying = false;
   const botToStop = bot;
   bot = undefined;
+  const shouldStopPolling = polling;
   polling = false;
+  webhookActive = false;
   pollingError = undefined;
   botUsername = undefined;
-  if (!botToStop) return;
+  if (!botToStop || !shouldStopPolling) return;
   await botToStop.stop();
 }
 
