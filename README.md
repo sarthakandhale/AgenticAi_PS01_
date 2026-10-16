@@ -176,12 +176,24 @@ npm run lint
 
 Backend unit/integration checks mock model/database boundaries and require no credentials. The full Telegram + Gemini + Supabase demonstration requires real credentials and was not exercised by the automated tests.
 
+## Deploy the backend on Render
+
+The backend uses Telegram long polling, so deploy it as one always-on web service. The repository's [`render.yaml`](./render.yaml) defines a Render Blueprint with the backend root directory, health check, and secret variables left for secure entry in Render. Its `starter` service plan is paid; do not change it to a free instance for the Telegram bot because free web services can spin down while idle.
+
+1. Rotate any credentials that were shared in chat or committed accidentally. Do not commit `backend/.env` or paste secrets into source files.
+2. Sign in to Render and create a **New + > Blueprint** from this GitHub repository, using `render.yaml` at the repository root.
+3. During Blueprint setup, enter fresh values for `COORDINATOR_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `TELEGRAM_BOT_TOKEN`, and `FRONTEND_ORIGIN`. For `FRONTEND_ORIGIN`, enter the exact origin of the dashboard that will call this backend (scheme and host, without a trailing slash; comma-separate multiple origins). Enter secrets only in Render's environment-variable form. `GOOGLE_API_KEY` is optional; add it in the Render service's environment settings if AI reply analysis is needed.
+4. Confirm the paid service plan and create the service. Keep exactly one instance running for this bot token; multiple instances can conflict while polling Telegram.
+5. After deployment, open `https://<your-service>.onrender.com/api/health`. Check `status: "ok"`, `telegram.polling: true`, and `database.configured: true`. Health only reports configuration/runtime flags, not that every Supabase query succeeds.
+6. In the dashboard's **Settings**, set Backend base URL to `https://<your-service>.onrender.com` and enter the same `COORDINATOR_API_KEY` value. The dashboard must itself be reachable at the origin configured as `FRONTEND_ORIGIN`.
+7. Share the backend URL with trusted teammates as needed. The API is internet-reachable, but coordinator endpoints still require the key. This project does not yet have per-user login or role authorization; do not distribute the shared key broadly.
+
 ## Limitations and deployment notes
 
 - The browser retains the existing demo-first local data store. New/edited projects and tasks sync to the backend when it is connected; old demo records are not automatically bulk-imported.
 - Create/register a project participant in Team before assigning real backend tasks. Existing sample teammates are illustrative records, not registered Telegram identities.
 - Follow-ups are coordinator-triggered; no scheduled reminder worker is enabled. A locally running backend cannot process anything while the computer is off.
-- Telegram uses long polling for local development. Use a secured webhook or a long-running worker for deployment; do not run multiple polling replicas with one bot token.
+- Telegram uses long polling. Keep the deployed backend as a single continuously running instance; do not run multiple pollers with one bot token.
 - The project has no full login/role-management provider. The shared coordinator key is suitable only for a controlled demo/trusted deployment; use authenticated user sessions and per-role authorization before exposing the API publicly.
 - Gemini estimates are not guarantees. Ambiguous analysis is recorded for audit and does not replace the current task status.
 - If Gemini is unavailable, the message is retained and the bot reports the analysis failure; no status update is claimed as successful.

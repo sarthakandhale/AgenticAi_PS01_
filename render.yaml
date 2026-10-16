@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: projectpilot-backend
+    runtime: node
+    plan: starter
+    region: oregon
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: COORDINATOR_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: MAX_FOLLOWUPS_PER_DAY
+        value: "5"
