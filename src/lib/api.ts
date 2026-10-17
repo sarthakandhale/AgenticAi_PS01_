@@ -137,4 +137,47 @@ export const api = {
     call<{ tasks: BackendTask[] }>(base, projectId ? `/api/tasks?project_id=${encodeURIComponent(projectId)}` : "/api/tasks", undefined, key),
   listEvents: (base: string, projectId?: string, key = "") =>
     call<{ events: BackendEvent[] }>(base, projectId ? `/api/events?project_id=${encodeURIComponent(projectId)}` : "/api/events", undefined, key),
+  updateParticipant: (base: string, id: string, body: Record<string, unknown>, key = "") =>
+    call<{
+      participant: {
+        id: string;
+        display_name: string;
+        role: string;
+        department: string;
+        telegram_linked: boolean;
+      };
+    }>(
+      base,
+      `/api/participants/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+      key,
+    ),
+  listMessages: (base: string, key = "") =>
+    call<{
+      messages: Array<{
+        id: string;
+        memberId: string;
+        memberName: string;
+        taskId?: string;
+        direction: "in" | "out";
+        text: string;
+        status: string;
+        timestamp: string;
+      }>;
+    }>(base, "/api/messages", undefined, key),
+  organizeMeet: (
+    base: string,
+    projectId: string,
+    body: { title?: string; meeting_url?: string; agenda?: string; organizer_name?: string },
+    key = "",
+  ) =>
+    call<{
+      success: boolean;
+      delivered_count: number;
+      meeting_url: string;
+      recipients: Array<{ id: string; name: string; delivered: boolean }>;
+    }>(base, `/api/projects/${encodeURIComponent(projectId)}/organize-meet`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }, key),
 };

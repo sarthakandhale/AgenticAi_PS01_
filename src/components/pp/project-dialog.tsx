@@ -62,10 +62,12 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
           <div className="space-y-1.5"><Label htmlFor="p-t">Target completion</Label><Input id="p-t" type="date" value={f.targetDate} onChange={(x) => setF({ ...f, targetDate: x.target.value })} />{e("targetDate")}</div>
           <div className="space-y-1.5 sm:col-span-2">
             <Label>Team members</Label>
-            <div className="grid grid-cols-2 gap-1 rounded-md border p-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 rounded-md border p-2 max-h-48 overflow-y-auto">
               {data.members.map((m) => (
-                <label key={m.id} className="flex items-center gap-2 text-sm">
-                  <Checkbox checked={f.memberIds.includes(m.id)} onCheckedChange={(c) => setF({ ...f, memberIds: c ? [...f.memberIds, m.id] : f.memberIds.filter((x) => x !== m.id) })} />{m.name}
+                <label key={m.id} className="flex items-center gap-2 text-sm py-0.5 cursor-pointer hover:bg-muted/30 px-1 rounded">
+                  <Checkbox checked={f.memberIds.includes(m.id)} onCheckedChange={(c) => setF({ ...f, memberIds: c ? [...f.memberIds, m.id] : f.memberIds.filter((x) => x !== m.id) })} />
+                  <span className="font-medium truncate">{m.name}</span>
+                  {m.role && <span className="text-[11px] text-muted-foreground truncate">({m.role})</span>}
                 </label>
               ))}
             </div>

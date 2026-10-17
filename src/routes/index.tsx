@@ -7,6 +7,8 @@ import { PageHeader, Panel, Stat, Empty } from "@/components/pp/page";
 import { DemoBadge, HealthBadge } from "@/components/pp/badges";
 import { TaskRows } from "@/components/pp/task-table";
 import { ActivityList } from "@/components/pp/activity-list";
+import { Calendar } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 
 export const Route = createFileRoute("/")({
@@ -17,7 +19,7 @@ export const Route = createFileRoute("/")({
 const COLORS = { Pending: "var(--chart-5)", "In Progress": "var(--chart-2)", Blocked: "var(--chart-3)", Complete: "var(--chart-1)" };
 
 function Overview() {
-  const { data, selectedProjectId } = useStore();
+  const { data, selectedProjectId, setCalendarOpen } = useStore();
   const { member, project } = useLookup();
   const navigate = useNavigate();
   const tasks = useScopedTasks();
@@ -43,7 +45,25 @@ function Overview() {
 
   return (
     <>
-      <PageHeader title="Overview" description="Your AI teammate for project delivery — the latest recorded state of your portfolio." actions={data.settings.demoMode ? <DemoBadge /> : undefined} />
+      <PageHeader
+        title="Overview"
+        description="Your AI teammate for project delivery — the latest recorded state of your portfolio."
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCalendarOpen(true)}
+              className="gap-2 border-primary/30 text-primary hover:bg-primary/10 shadow-xs font-medium"
+              title="Open Team Calendar & Schedule Planner"
+            >
+              <Calendar className="h-4 w-4" />
+              <span>Calendar</span>
+            </Button>
+            {data.settings.demoMode ? <DemoBadge /> : undefined}
+          </div>
+        }
+      />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <Stat label="Active projects" value={projects.length} onClick={() => navigate({ to: "/projects" })} />
         <Stat label="Total tasks" value={s.total} onClick={() => navigate({ to: "/tasks" })} />

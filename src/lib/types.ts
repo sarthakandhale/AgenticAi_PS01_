@@ -75,7 +75,9 @@ export type ActivityType =
   | "escalation"
   | "report_generated"
   | "project_created"
-  | "project_updated";
+  | "project_updated"
+  | "event_scheduled"
+  | "event_cancelled";
 
 export interface Activity {
   id: string;
@@ -142,6 +144,19 @@ export interface Settings {
   };
 }
 
+export interface ScheduledEvent {
+  id: string;
+  title: string;
+  date: string; // YYYY-MM-DD
+  time?: string; // e.g. "10:00 AM"
+  projectId?: string;
+  type: "meeting" | "review" | "release" | "milestone" | "deadline" | "general";
+  meetingUrl?: string;
+  location?: string;
+  description?: string;
+  createdAt: string;
+}
+
 export interface AppData {
   members: Member[];
   projects: Project[];
@@ -150,4 +165,5 @@ export interface AppData {
   messages: Message[];
   proposals: Proposal[];
   settings: Settings;
+  events?: ScheduledEvent[];
 }

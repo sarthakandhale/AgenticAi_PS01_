@@ -276,7 +276,7 @@ begin
     set status = case p_next_status
           when 'IN_PROGRESS' then 'in_progress'
           when 'BLOCKED' then 'blocked'
-          when 'COMPLETE' then 'complete'
+          when 'COMPLETE' then 'completed'
         end,
         blocker = case when p_next_status = 'BLOCKED' then p_blocker else null end,
         updated_at = now()

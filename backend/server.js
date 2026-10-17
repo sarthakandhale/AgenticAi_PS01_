@@ -30,7 +30,10 @@ import {
   recordOutboundMessage,
   registerParticipant,
   setFollowupDelivery,
+  updateParticipant,
+  listAllMessages,
   updateProject,
+  organizeProjectMeet,
   updateTask,
 } from "./services/taskService.js";
 import {
@@ -55,6 +58,7 @@ const projectInput = z.object({
   manager_id: z.string().max(100).nullable().optional(),
   start_date: z.string().date().nullable().optional(),
   target_date: z.string().date().nullable().optional(),
+  member_ids: z.array(z.string().min(1).max(100)).max(100).optional(),
   milestones: z.array(z.object({
     id: z.string().max(80),
     name: z.string().trim().min(1).max(160),
@@ -95,6 +99,12 @@ const participantInput = z.object({
   display_name: z.string().trim().min(1).max(120),
   role: z.string().max(120).optional(),
   department: z.string().max(120).optional(),
+});
+const participantUpdateInput = z.object({
+  display_name: z.string().trim().min(1).max(120).optional(),
+  role: z.string().max(120).optional(),
+  department: z.string().max(120).optional(),
+  project_id: z.string().min(1).max(80).optional(),
 });
 const requestInput = z.object({
   member_id: z.string().min(1).max(100),
@@ -278,6 +288,18 @@ app.get("/api/participants", async (_req, res) => {
   res.json({ participants: await listParticipants() });
 });
 
+app.patch("/api/participants/:id", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const input = validate(participantUpdateInput, req.body);
+  const participant = await updateParticipant(id, input);
+  if (!participant) return res.status(404).json({ error: "Participant not found." });
+  res.json({ participant });
+});
+
+app.get("/api/messages", async (_req, res) => {
+  res.json({ messages: await listAllMessages() });
+});
+
 app.post("/api/tasks/:id/request-update", async (req, res) => {
   const taskId = validate(z.string().min(1).max(80), req.params.id);
   const { member_id: memberId, text } = validate(requestInput, req.body);
@@ -325,6 +347,19 @@ app.get("/api/projects/:id/report", async (req, res) => {
   res.json({ report });
 });
 
+app.post("/api/projects/:id/organize-meet", async (req, res) => {
+  const projectId = validate(z.string().min(1).max(80), req.params.id);
+  const meetSchema = z.object({
+    title: z.string().max(200).optional().default(""),
+    meeting_url: z.string().max(500).optional().default(""),
+    agenda: z.string().max(500).optional().default(""),
+    organizer_name: z.string().max(100).optional().default("Project Coordinator"),
+  });
+  const body = validate(meetSchema, req.body || {});
+  const result = await organizeProjectMeet(projectId, body);
+  res.status(200).json(result);
+});
+
 app.use((error, _req, res, _next) => {
   const result = publicError(error);
   res.status(result.status).json({ error: result.message });
@@ -333,12 +368,6 @@ app.use((error, _req, res, _next) => {
 export { app };
 
 export async function startServer() {
-  if (supabase && config.telegramToken) {
-    await startTelegramBot();
-  } else if (config.telegramToken) {
-    console.warn("Telegram bot not started: configure Supabase first.");
-  }
-
   const server = createServer(app);
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -347,6 +376,13 @@ export async function startServer() {
       resolve();
     });
   });
+  console.info(`ProjectPilot API listening on port ${config.port}.`);
+
+  if (supabase && config.telegramToken) {
+    await startTelegramBot();
+  } else if (config.telegramToken) {
+    console.warn("Telegram bot not started: configure Supabase first.");
+  }
 
   const shutdown = async () => {
     await stopTelegramBot();
@@ -356,13 +392,12 @@ export async function startServer() {
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  console.info(`ProjectPilot API listening on port ${config.port}.`);
   return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   startServer().catch((error) => {
     console.error("Backend startup failed:", error.message);
-    process.exitCode = 1;
+    process.exit(1);
   });
 }

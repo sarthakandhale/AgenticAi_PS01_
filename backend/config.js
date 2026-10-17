@@ -35,7 +35,7 @@ export const config = {
       ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, "")}/api/telegram/webhook`
       : ""),
   googleApiKey: process.env.GOOGLE_API_KEY || "",
-  geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+  geminiModel: process.env.GEMINI_MODEL || "gemini-3.5-flash",
   maxFollowupsPerDay,
   supabaseUrl: process.env.SUPABASE_URL || "",
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",

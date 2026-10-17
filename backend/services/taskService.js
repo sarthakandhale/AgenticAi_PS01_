@@ -6,11 +6,12 @@ const DB_STATUS = {
   Pending: "pending",
   "In Progress": "in_progress",
   Blocked: "blocked",
-  Complete: "complete",
+  Complete: "completed",
+  Completed: "completed",
   TODO: "pending",
   IN_PROGRESS: "in_progress",
   BLOCKED: "blocked",
-  COMPLETE: "complete",
+  COMPLETE: "completed",
 };
 const API_STATUS = {
   pending: "TODO",
@@ -51,10 +52,12 @@ function asId(value) {
 
 function projectPayload(row) {
   if (!row) return null;
+  const member_ids = (row.project_members || []).map((m) => asId(m.participant_id)).filter(Boolean);
   return {
     ...row,
     id: asId(row.client_id ?? row.id),
     manager_id: asId(row.manager_id),
+    member_ids: member_ids.length > 0 ? member_ids : (row.member_ids ?? []),
   };
 }
 
@@ -79,8 +82,8 @@ function taskPayload(row, projectClientId = null) {
 }
 
 export async function resolveProjectDbId(value, db = requireDatabase()) {
-  if (value == null) return null;
-  const id = String(value);
+  if (value == null || value === "null" || value === "undefined") return null;
+  const id = String(value).trim();
   const { data: byClientId, error: clientError } = await db
     .from("projects")
     .select("id")
@@ -98,24 +101,103 @@ export async function resolveProjectDbId(value, db = requireDatabase()) {
   return data?.id ?? null;
 }
 
+export async function resolveParticipantDbId(value, db = requireDatabase()) {
+  if (value == null || value === "null" || value === "undefined") return null;
+  const id = String(value).trim();
+  if (!id) return null;
+  if (/^\d+$/.test(id)) {
+    const { data, error } = await db
+      .from("participants")
+      .select("id")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return data.id;
+  }
+  const { data: byName, error: nameError } = await db
+    .from("participants")
+    .select("id")
+    .eq("display_name", id)
+    .maybeSingle();
+  if (nameError) throw nameError;
+  return byName?.id ?? null;
+}
+
+export async function syncProjectMembers(projectDbId, memberIds, db = requireDatabase()) {
+  if (!Array.isArray(memberIds)) return;
+  const resolvedIds = [];
+  for (const mId of memberIds) {
+    const pDbId = await resolveParticipantDbId(mId, db);
+    if (pDbId != null && !resolvedIds.includes(pDbId)) {
+      resolvedIds.push(pDbId);
+    }
+  }
+
+  const { data: currentMembers, error: fetchError } = await db
+    .from("project_members")
+    .select("participant_id")
+    .eq("project_id", projectDbId);
+  if (fetchError) throw fetchError;
+
+  const currentIds = new Set((currentMembers || []).map((m) => m.participant_id));
+
+  for (const pId of resolvedIds) {
+    if (!currentIds.has(pId)) {
+      const { error: insertError } = await db.from("project_members").insert({
+        project_id: projectDbId,
+        participant_id: pId,
+      });
+      if (insertError) {
+        console.warn(`Could not add project member ${pId}:`, insertError.message);
+      }
+    }
+  }
+}
+
 export async function resolveTaskDbId(value, db = requireDatabase()) {
-  if (value == null) return null;
-  const id = String(value);
+  if (value == null || value === "null" || value === "undefined") return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
   const { data: byClientId, error: clientError } = await db
     .from("tasks")
     .select("id")
-    .eq("client_id", id)
+    .eq("client_id", raw)
     .maybeSingle();
   if (clientError) throw clientError;
   if (byClientId) return byClientId.id;
-  if (!/^\d+$/.test(id)) return null;
-  const { data, error } = await db
-    .from("tasks")
-    .select("id")
-    .eq("id", id)
-    .maybeSingle();
-  if (error) throw error;
-  return data?.id ?? null;
+
+  if (/^\d+$/.test(raw)) {
+    const { data, error } = await db
+      .from("tasks")
+      .select("id")
+      .eq("id", raw)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return data.id;
+  }
+
+  const leadingIdMatch = raw.match(/^([a-zA-Z0-9_\-]+)/);
+  if (leadingIdMatch && leadingIdMatch[1] !== raw) {
+    const cleanId = leadingIdMatch[1];
+    const { data: byCleanClient } = await db
+      .from("tasks")
+      .select("id")
+      .eq("client_id", cleanId)
+      .maybeSingle();
+    if (byCleanClient) return byCleanClient.id;
+
+    if (/^\d+$/.test(cleanId)) {
+      const { data: byCleanNum } = await db
+        .from("tasks")
+        .select("id")
+        .eq("id", cleanId)
+        .maybeSingle();
+      if (byCleanNum) return byCleanNum.id;
+    }
+  }
+
+  return null;
 }
 
 async function getProjectClientId(projectDbId, db = requireDatabase()) {
@@ -138,14 +220,20 @@ export async function listProjects() {
 
 export async function createProject(input) {
   const db = requireDatabase();
+  const managerDbId = input.manager_id ? await resolveParticipantDbId(input.manager_id, db) : null;
   if (input.id) {
     const { data: existing, error: lookupError } = await db
       .from("projects")
-      .select("*")
+      .select("*, project_members(participant_id)")
       .eq("client_id", input.id)
       .maybeSingle();
     if (lookupError) throw lookupError;
-    if (existing) return projectPayload(existing);
+    if (existing) {
+      if (input.member_ids) {
+        await syncProjectMembers(existing.id, input.member_ids, db);
+      }
+      return projectPayload(existing);
+    }
   }
   const { data, error } = await db
     .from("projects")
@@ -153,14 +241,17 @@ export async function createProject(input) {
       ...(input.id ? { client_id: input.id } : {}),
       name: input.name,
       description: input.description ?? "",
-      manager_id: input.manager_id || null,
+      manager_id: managerDbId,
       start_date: input.start_date ?? null,
       target_date: input.target_date ?? null,
       milestones: input.milestones ?? [],
     })
-    .select()
+    .select("*, project_members(participant_id)")
     .single();
   if (error) throw error;
+  if (input.member_ids) {
+    await syncProjectMembers(data.id, input.member_ids, db);
+  }
   return projectPayload(data);
 }
 
@@ -168,20 +259,34 @@ export async function updateProject(projectId, input) {
   const db = requireDatabase();
   const id = await resolveProjectDbId(projectId, db);
   if (id == null) return null;
+  const updateData = {};
+  if ("name" in input) updateData.name = input.name;
+  if ("description" in input) updateData.description = input.description;
+  if ("manager_id" in input) {
+    updateData.manager_id = input.manager_id ? await resolveParticipantDbId(input.manager_id, db) : null;
+  }
+  if ("start_date" in input) updateData.start_date = input.start_date;
+  if ("target_date" in input) updateData.target_date = input.target_date;
+  if ("milestones" in input) updateData.milestones = input.milestones;
+  updateData.updated_at = new Date().toISOString();
+
   const { data, error } = await db
     .from("projects")
-    .update({ ...input, updated_at: new Date().toISOString() })
+    .update(updateData)
     .eq("id", id)
-    .select()
+    .select("*, project_members(participant_id)")
     .maybeSingle();
   if (error) throw error;
+  if (input.member_ids) {
+    await syncProjectMembers(id, input.member_ids, db);
+  }
   return projectPayload(data);
 }
 
 export async function listTasks(projectId) {
   const db = requireDatabase();
   let query = db.from("tasks").select("*").order("created_at");
-  if (projectId) {
+  if (projectId && projectId !== "null" && projectId !== "undefined") {
     const projectDbId = await resolveProjectDbId(projectId, db);
     if (projectDbId == null) return [];
     query = query.eq("project_id", projectDbId);
@@ -465,16 +570,33 @@ export async function linkTelegramAccount({ code, telegramUserId, chatId, userna
     })
     .eq("telegram_link_code_hash", hashLinkCode(code))
     .gt("telegram_link_code_expires_at", new Date().toISOString())
-    .select("id, display_name")
+    .select("id, display_name, role, department")
     .maybeSingle();
   if (error) throw error;
-  return data ? { ...data, id: asId(data.id) } : null;
+  if (!data) return null;
+
+  // Fetch project memberships so the bot knows which project(s) this participant is on
+  const { data: memberships } = await db
+    .from("project_members")
+    .select("project_id, projects(id, client_id, name)")
+    .eq("participant_id", data.id);
+
+  const projects = (memberships || []).map((m) => ({
+    id: asId(m.projects?.client_id ?? m.projects?.id ?? m.project_id),
+    name: m.projects?.name ?? "",
+  }));
+
+  return {
+    ...data,
+    id: asId(data.id),
+    projects,
+  };
 }
 
 export async function getParticipantByTelegramId(telegramUserId, db = requireDatabase()) {
   const { data, error } = await db
     .from("participants")
-    .select("id, display_name, telegram_chat_id")
+    .select("id, display_name, role, department, telegram_chat_id, telegram_user_id, telegram_username")
     .eq("telegram_user_id", String(telegramUserId))
     .maybeSingle();
   if (error) throw error;
@@ -528,20 +650,49 @@ export async function getParticipantReport(participantId) {
 }
 
 export async function createFollowup({ task, participant, text }) {
-  const { data, error } = await requireDatabase().rpc("create_followup_if_allowed", {
-    p_task_id: task._dbId,
-    p_project_id: task._dbProjectId,
-    p_participant_id: participant.id,
-    p_message_text: text,
-    p_max_per_day: config.maxFollowupsPerDay,
-  });
-  if (error) {
-    if (error.message.includes("limit reached") || error.message.includes("within the last hour")) {
-      throw Object.assign(new Error(error.message), { status: 429 });
-    }
-    throw error;
+  const db = requireDatabase();
+  // Mark previous unreplied followups for this task as REPLIED so only the new one is active
+  try {
+    await db
+      .from("followups")
+      .update({ status: "REPLIED", replied_at: new Date().toISOString() })
+      .eq("task_id", task._dbId)
+      .eq("status", "AWAITING_REPLY");
+  } catch {
+    // Non-fatal if table update is mocked or restricted
   }
-  return { id: data };
+
+  // Directly insert followup to allow admin requests without 1-hour lockout
+  const { data, error } = await db
+    .from("followups")
+    .insert({
+      task_id: task._dbId,
+      project_id: task._dbProjectId,
+      participant_id: participant.id,
+      message_text: text,
+      status: "AWAITING_REPLY",
+      requested_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    const { data: rpcData, error: rpcError } = await db.rpc("create_followup_if_allowed", {
+      p_task_id: task._dbId,
+      p_project_id: task._dbProjectId,
+      p_participant_id: participant.id,
+      p_message_text: text,
+      p_max_per_day: config.maxFollowupsPerDay,
+    });
+    if (rpcError) {
+      if (rpcError.message.includes("limit reached") || rpcError.message.includes("within the last hour")) {
+        throw Object.assign(new Error(rpcError.message), { status: 429 });
+      }
+      throw rpcError;
+    }
+    return { id: rpcData };
+  }
+  return { id: data.id };
 }
 
 export async function setFollowupDelivery(followupId, status, telegramMessageId, errorMessage) {
@@ -631,25 +782,120 @@ export async function recordReplyDecision({ followup, messageId, reply, analysis
   const taskDbId = finalTaskId
     ? await resolveTaskDbId(finalTaskId, db)
     : followup?.task_id ?? null;
+
+  let currentTask = null;
+  if (taskDbId != null && db.from) {
+    try {
+      const { data: tRow } = await db
+        .from("tasks")
+        .select("id, project_id, status, owner_id")
+        .eq("id", taskDbId)
+        .maybeSingle();
+      currentTask = tRow;
+    } catch {
+      // Continue if query is not available
+    }
+  }
+
   const projectDbId = followup?.project_id ??
+    currentTask?.project_id ??
     (taskDbId == null ? null : await getProjectDbIdForTask(taskDbId, db));
+
   const status = {
     IN_PROGRESS: "IN_PROGRESS",
     BLOCKED: "BLOCKED",
     COMPLETE: "COMPLETE",
   }[analysis.classification];
-  const { error } = await db.rpc("apply_reply_decision", {
-    p_project_id: projectDbId,
-    p_task_id: taskDbId,
-    p_participant_id: participantId,
-    p_message_id: messageId,
-    p_followup_id: followup?.id ?? null,
-    p_evidence: reply,
-    p_analysis: analysis,
-    p_next_status: status ?? null,
-    p_blocker: status === "BLOCKED" ? analysis.blocker : null,
-  });
-  if (error) throw error;
+
+  const dbStatus = {
+    IN_PROGRESS: "in_progress",
+    BLOCKED: "blocked",
+    COMPLETE: "completed",
+  }[analysis.classification];
+
+  try {
+    if (db.from) {
+      if (taskDbId != null && dbStatus != null) {
+        const updatePayload = {
+          status: dbStatus,
+          blocker: status === "BLOCKED" ? (analysis.blocker || "Blocked") : null,
+          updated_at: new Date().toISOString(),
+        };
+        const { error: taskErr } = await db
+          .from("tasks")
+          .update(updatePayload)
+          .eq("id", taskDbId);
+        if (taskErr) throw taskErr;
+      }
+
+      const { error: eventErr } = await db.from("task_events").insert({
+        project_id: projectDbId,
+        task_id: taskDbId,
+        participant_id: participantId,
+        event_type: "telegram_reply_analysis",
+        evidence: reply,
+        message_id: messageId,
+        analysis,
+        previous_status: currentTask?.status ?? null,
+        next_status: status ?? null,
+      });
+      if (eventErr) throw eventErr;
+
+      if (followup?.id) {
+        await db
+          .from("followups")
+          .update({
+            status: "REPLIED",
+            replied_at: new Date().toISOString(),
+          })
+          .eq("id", followup.id);
+      }
+
+      if (messageId) {
+        await db
+          .from("telegram_messages")
+          .update({
+            task_id: taskDbId,
+            processing_status: "PROCESSED",
+            processing_error: null,
+          })
+          .eq("id", messageId);
+      }
+      return;
+    }
+  } catch (directErr) {
+    if (db.rpc) {
+      const { error } = await db.rpc("apply_reply_decision", {
+        p_project_id: projectDbId,
+        p_task_id: taskDbId,
+        p_participant_id: participantId,
+        p_message_id: messageId,
+        p_followup_id: followup?.id ?? null,
+        p_evidence: reply,
+        p_analysis: analysis,
+        p_next_status: status ?? null,
+        p_blocker: status === "BLOCKED" ? analysis.blocker : null,
+      });
+      if (error) throw error;
+      return;
+    }
+    throw directErr;
+  }
+
+  if (db.rpc) {
+    const { error } = await db.rpc("apply_reply_decision", {
+      p_project_id: projectDbId,
+      p_task_id: taskDbId,
+      p_participant_id: participantId,
+      p_message_id: messageId,
+      p_followup_id: followup?.id ?? null,
+      p_evidence: reply,
+      p_analysis: analysis,
+      p_next_status: status ?? null,
+      p_blocker: status === "BLOCKED" ? analysis.blocker : null,
+    });
+    if (error) throw error;
+  }
 }
 
 async function getProjectDbIdForTask(taskDbId, db) {
@@ -687,6 +933,61 @@ export async function listParticipants() {
     };
   }));
   return participants;
+}
+
+export async function updateParticipant(participantId, input, db = requireDatabase()) {
+  const pDbId = await resolveParticipantDbId(participantId, db);
+  if (pDbId == null) return null;
+  const updateData = { updated_at: new Date().toISOString() };
+  if (input.display_name !== undefined) updateData.display_name = input.display_name.trim();
+  if (input.role !== undefined) updateData.role = input.role.trim();
+  if (input.department !== undefined) updateData.department = input.department.trim();
+
+  const { data, error } = await db
+    .from("participants")
+    .update(updateData)
+    .eq("id", pDbId)
+    .select("id, display_name, role, department, telegram_user_id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+
+  if (input.project_id) {
+    const projectDbId = await resolveProjectDbId(input.project_id, db);
+    if (projectDbId) {
+      await db.from("project_members").upsert({
+        project_id: projectDbId,
+        participant_id: pDbId,
+      }, { onConflict: "project_id,participant_id" });
+    }
+  }
+
+  return {
+    id: asId(data.id),
+    display_name: data.display_name,
+    role: data.role ?? "",
+    department: data.department ?? "",
+    telegram_linked: Boolean(data.telegram_user_id),
+  };
+}
+
+export async function listAllMessages(limit = 100, db = requireDatabase()) {
+  const { data, error } = await db
+    .from("telegram_messages")
+    .select("id, participant_id, task_id, direction, message_text, processing_status, created_at, participants(display_name)")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data.map((msg) => ({
+    id: msg.id,
+    memberId: asId(msg.participant_id),
+    memberName: msg.participants?.display_name ?? "",
+    taskId: asId(msg.task_id),
+    direction: msg.direction === "INBOUND" ? "in" : "out",
+    text: msg.message_text,
+    status: msg.processing_status,
+    timestamp: msg.created_at,
+  }));
 }
 
 export async function getProjectReport(projectId) {
@@ -736,7 +1037,7 @@ export async function getParticipantContext(participantId, db = requireDatabase(
 
 export async function listAllEvents(projectId = null, limit = 50, db = requireDatabase()) {
   let query = db.from("task_events").select("*").order("created_at", { ascending: false }).limit(limit);
-  if (projectId) {
+  if (projectId && projectId !== "null" && projectId !== "undefined") {
     const projectDbId = await resolveProjectDbId(projectId, db);
     if (projectDbId) query = query.eq("project_id", projectDbId);
   }
@@ -778,8 +1079,7 @@ export async function checkAndTriggerDependencyHandoffs(
   const { data: candidates, error: candError } = await db
     .from("tasks")
     .select("id, client_id, project_id, title, owner_id, status, blocker, dependencies")
-    .neq("status", "complete")
-    .neq("status", "blocked");
+    .not("status", "in", '("complete","completed","blocked")');
   if (candError) throw candError;
 
   // Preload task statuses for prerequisite evaluation
@@ -807,7 +1107,7 @@ export async function checkAndTriggerDependencyHandoffs(
     // Check if ALL prerequisites are complete
     const allPrereqsMet = deps.every((dep) => {
       const depStatus = statusMap.get(String(dep));
-      return depStatus === "complete";
+      return depStatus === "complete" || depStatus === "completed";
     });
 
     if (!allPrereqsMet) {
@@ -927,5 +1227,117 @@ export async function checkAndTriggerDependencyHandoffs(
   }
 
   return triggeredHandoffs;
+}
+
+export async function organizeProjectMeet(
+  projectId,
+  { title, meeting_url, agenda = "", organizer_name = "Project Coordinator" },
+  db = requireDatabase(),
+  sendFn = null,
+) {
+  const projectDbId = await resolveProjectDbId(projectId, db);
+  if (!projectDbId) {
+    throw Object.assign(new Error("Project not found."), { status: 404 });
+  }
+
+  const { data: project, error: projErr } = await db
+    .from("projects")
+    .select("id, client_id, name, description")
+    .eq("id", projectDbId)
+    .single();
+  if (projErr) throw projErr;
+
+  const { data: memberships, error: memErr } = await db
+    .from("project_members")
+    .select("participant_id, participants(id, display_name, telegram_chat_id, telegram_user_id)")
+    .eq("project_id", projectDbId);
+  if (memErr) throw memErr;
+
+  const sender = sendFn || (async (chatId, text) => {
+    const { sendTelegramMessage } = await import("./telegram.js");
+    return sendTelegramMessage(chatId, text);
+  });
+
+  const meetTitle = title || `${project.name} Team Meeting`;
+  const roomTag = String(project.client_id || project.id).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const meetUrl = meeting_url || `https://meet.jit.si/projectpilot-${roomTag || "room"}-${Date.now().toString(36)}`;
+
+  const messageText = [
+    `🚨 Team Meeting Alert: ${project.name}`,
+    ``,
+    `👤 Organizer: ${organizer_name}`,
+    `📌 Topic: ${meetTitle}`,
+    agenda ? `📝 Agenda: ${agenda}` : null,
+    ``,
+    `🔗 Join Meeting Link:`,
+    `${meetUrl}`,
+    ``,
+    `👉 Please click the link above to join the team call now.`,
+  ].filter(Boolean).join("\n");
+
+  const results = [];
+  let deliveredCount = 0;
+
+  for (const m of memberships || []) {
+    const p = m.participants;
+    if (!p) continue;
+
+    if (!p.telegram_chat_id) {
+      results.push({ id: String(p.id), name: p.display_name, delivered: false, reason: "No Telegram linked" });
+      continue;
+    }
+
+    let delivered = false;
+    let sentMsgId = null;
+    try {
+      const sent = await sender(p.telegram_chat_id, messageText);
+      sentMsgId = sent?.message_id ?? null;
+      delivered = true;
+      deliveredCount += 1;
+    } catch (sendError) {
+      console.warn(`Meeting notification failed for participant ${p.id}:`, sendError.message);
+    }
+
+    if (delivered && sentMsgId) {
+      try {
+        await db.from("telegram_messages").insert({
+          direction: "OUTBOUND",
+          participant_id: p.id,
+          telegram_message_id: sentMsgId,
+          message_text: messageText,
+          processing_status: "PROCESSED",
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    results.push({ id: String(p.id), name: p.display_name, delivered });
+  }
+
+  try {
+    await db.from("task_events").insert({
+      project_id: projectDbId,
+      event_type: "team_meeting",
+      evidence: `Team meet organized by ${organizer_name}: ${meetTitle}`,
+      analysis: {
+        title: meetTitle,
+        meeting_url: meetUrl,
+        agenda,
+        organizer: organizer_name,
+        deliveredCount,
+        totalMembers: memberships?.length || 0,
+      },
+    });
+  } catch (eventErr) {
+    console.warn("Failed to log meeting task_event:", eventErr.message);
+  }
+
+  return {
+    success: true,
+    delivered_count: deliveredCount,
+    meeting_url: meetUrl,
+    recipients: results,
+  };
 }
 

@@ -93,12 +93,16 @@ async function handleText(ctx) {
     return;
   }
 
-  if (analysis.classification !== "UNCLEAR" && !analysis.taskId && tasks.length === 1) {
-    analysis.taskId = tasks[0].id;
+  if (analysis.classification !== "UNCLEAR" && !analysis.taskId) {
+    if (followup?.task_id) {
+      analysis.taskId = String(followup.task_id);
+    } else if (tasks.length === 1) {
+      analysis.taskId = tasks[0].id;
+    }
   }
   const selectedFollowup =
     followup ??
-    pendingFollowups.find((entry) => entry.task_id === analysis.taskId) ??
+    pendingFollowups.find((entry) => String(entry.task_id) === String(analysis.taskId)) ??
     null;
   try {
     await recordReplyDecision({
@@ -139,10 +143,12 @@ async function handleText(ctx) {
     );
     return;
   }
+  const matchedTask = tasks.find((t) => String(t.id) === String(analysis.taskId));
+  const taskLabel = matchedTask ? `"${matchedTask.title}"` : "your task";
   const messages = {
-    IN_PROGRESS: "Thanks — your progress update has been recorded.",
-    BLOCKED: `Thanks — I recorded the blocker: ${analysis.blocker}`,
-    COMPLETE: "Thanks — the task has been marked complete.",
+    IN_PROGRESS: `📝 Thanks, ${participant.display_name}! Your progress update on ${taskLabel} has been recorded on the project dashboard.`,
+    BLOCKED: `⚠️ Blocker recorded for ${participant.display_name} on ${taskLabel}: ${analysis.blocker}. It has been flagged on the project dashboard.`,
+    COMPLETE: `✅ Great job, ${participant.display_name}! ${taskLabel} has been marked Complete on the project dashboard.`,
   };
   await ctx.reply(messages[analysis.classification]);
 }
@@ -171,11 +177,25 @@ export async function startTelegramBot() {
       chatId: ctx.chat.id,
       username: ctx.from.username,
     });
-    await ctx.reply(
-      linked
-        ? `Your Telegram account is linked to ${linked.display_name}. Use /tasks to view your assigned tasks.`
-        : "That registration code is invalid, expired, or already used. Ask your coordinator for a new code.",
-    );
+    if (linked) {
+      const roleText = linked.role ? ` as ${linked.role}` : "";
+      const projectList = (linked.projects || []).map((p) => p.name).filter(Boolean).join(", ");
+      const projectText = projectList ? ` for project "${projectList}"` : "";
+      await ctx.reply(
+        `👋 Welcome, ${linked.display_name}!\n\n` +
+        `Your Telegram account is now linked to your team profile${roleText}${projectText}.\n\n` +
+        `I am your AI Project Coordinator. Here is what you can do:\n` +
+        `• Message me anytime with updates on your progress (e.g. "frontend is completed" or "working on auth")\n` +
+        `• Report any blockers you run into (e.g. "blocked by API endpoints")\n` +
+        `• Use /tasks to see your assigned tasks\n` +
+        `• Use /report for your task summary\n\n` +
+        `Your updates will automatically reflect on your team dashboard in real-time.`
+      );
+    } else {
+      await ctx.reply(
+        "That registration code is invalid, expired, or already used. Ask your coordinator for a new code.",
+      );
+    }
   });
 
   botInstance.command("tasks", async (ctx) => {
@@ -223,9 +243,11 @@ export async function startTelegramBot() {
     console.info(`Telegram webhook configured for @${botUsername}.`);
     return botInstance;
   }
-  const startPolling = () => {
+  const startPolling = async () => {
     if (bot !== botInstance) return;
     pollingRetrying = false;
+    // Clear any dangling webhook before long polling
+    await botInstance.api.deleteWebhook({ drop_pending_updates: false }).catch(() => {});
     botInstance.start({
       onStart: (info) => {
         botUsername = info.username;
@@ -237,13 +259,20 @@ export async function startTelegramBot() {
     }).catch((error) => {
       if (bot !== botInstance) return;
       polling = false;
-      pollingError = pollingFailure(error);
+      const failureKind = pollingFailure(error);
+      pollingError = failureKind;
       pollingRetrying = true;
-      console.error("Telegram polling stopped unexpectedly:", error.message);
+      if (failureKind === "CONFLICT") {
+        console.warn(
+          `[Telegram Bot] ⚠️ 409 Conflict: Another process or terminal is currently polling @${botUsername || "ProjPilotAICoordinatorBot"}. Will retry in 10s...`,
+        );
+      } else {
+        console.error("Telegram polling stopped unexpectedly:", error.message);
+      }
       pollingRetryTimer = setTimeout(startPolling, pollingRetryDelayMs);
     });
   };
-  startPolling();
+  void startPolling();
   return botInstance;
 }
 

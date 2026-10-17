@@ -2,10 +2,11 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import {
   LayoutDashboard, FolderKanban, ListChecks, Bot, Radar, GitBranch, History, FileText, Users, Settings,
-  Bell, Plus, Menu, Plane, FlaskConical, ChevronDown,
+  Bell, Plus, Menu, Plane, FlaskConical, ChevronDown, Calendar,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -14,6 +15,7 @@ import { isOverdue } from "@/lib/rules";
 import { cn } from "@/lib/utils";
 import { TaskDialog } from "./task-dialog";
 import { TaskSheet } from "./task-sheet";
+import { CalendarView } from "./calendar-view";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -67,7 +69,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { data, selectedProjectId, setSelectedProjectId, openTaskDialog, setOpenTaskId, currentUser } = useStore();
+  const { data, selectedProjectId, setSelectedProjectId, openTaskDialog, setOpenTaskId, currentUser, calendarOpen, setCalendarOpen } = useStore();
   const [mobileOpen, setMobileOpen] = useState(false);
   const blocked = data.tasks.filter((t) => t.status === "Blocked");
   const overdue = data.tasks.filter(isOverdue);
@@ -94,6 +96,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             </SelectContent>
           </Select>
           <div className="ml-auto flex items-center gap-1 sm:gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setCalendarOpen(true)}
+              className="relative hover:bg-muted text-foreground/80 hover:text-foreground"
+              title="Team Schedule & Calendar"
+              aria-label="Open Team Schedule & Calendar"
+            >
+              <Calendar className="h-5 w-5" />
+            </Button>
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
@@ -138,6 +150,12 @@ export function AppShell({ children }: { children: ReactNode }) {
       </div>
       <TaskDialog />
       <TaskSheet />
+      <Dialog open={calendarOpen} onOpenChange={setCalendarOpen}>
+        <DialogContent className="max-w-6xl max-h-[92vh] overflow-y-auto p-2 sm:p-4">
+          <DialogTitle className="sr-only">Team Schedule & Planner</DialogTitle>
+          <CalendarView onClose={() => setCalendarOpen(false)} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

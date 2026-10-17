@@ -16,7 +16,7 @@ test("legacy lowercase task statuses map to the coordinator API contract", () =>
   assert.equal(toApiStatus("in_progress"), "IN_PROGRESS");
   assert.equal(toApiStatus("completed"), "COMPLETE");
   assert.equal(fromDbStatus("in_progress"), "In Progress");
-  assert.equal(toDbStatus("Complete"), "complete");
+  assert.equal(toDbStatus("Complete"), "completed");
   assert.throws(() => toApiStatus("waiting"), /Unsupported task status/);
 });
 

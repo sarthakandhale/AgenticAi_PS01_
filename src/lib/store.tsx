@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { createDemoData } from "./demo-data";
 import { api, resolveBackendUrl, type HealthResponse } from "./api";
 import { interpretReplyDemo } from "./rules";
-import type { Activity, AppData, Project, Proposal, Settings, Task, TaskStatus } from "./types";
+import type { Activity, AppData, Project, Proposal, ScheduledEvent, Settings, Task, TaskStatus } from "./types";
 
 const KEY = "projectpilot.demo.v1";
 const CURRENT_USER = "Priya Raman";
@@ -22,6 +22,7 @@ async function ensureBackendProject(project: Project, base: string, coordinatorA
       start_date: project.startDate,
       target_date: project.targetDate,
       milestones: project.milestones,
+      member_ids: project.memberIds,
     }, coordinatorApiKey);
   } catch (error) {
     const refreshed = await api.listProjects(base, coordinatorApiKey);
@@ -42,6 +43,8 @@ interface Store {
   setSelectedProjectId: (id: string) => void;
   openTaskId: string | null;
   setOpenTaskId: (id: string | null) => void;
+  calendarOpen: boolean;
+  setCalendarOpen: (open: boolean) => void;
   taskDialog: { open: boolean; task?: Task };
   openTaskDialog: (task?: Task) => void;
   closeTaskDialog: () => void;
@@ -53,10 +56,18 @@ interface Store {
   deleteTask: (id: string) => void;
   setStatus: (id: string, status: TaskStatus, note?: string) => void;
   saveProject: (p: Project, isNew: boolean) => void;
+  updateMember: (id: string, updates: { name?: string; role?: string; department?: string }) => Promise<void>;
   registerParticipant: (input: { projectId: string; name: string; role: string; department: string }) => Promise<string>;
   refreshParticipants: () => Promise<void>;
   refreshTask: (taskId: string) => Promise<void>;
+  syncWithBackend: () => Promise<void>;
   requestUpdate: (taskId: string, text: string) => Promise<void>;
+  organizeMeet: (
+    projectId: string,
+    meetData: { title?: string; meetingUrl?: string; agenda?: string },
+  ) => Promise<{ success: boolean; delivered_count: number; meeting_url: string }>;
+  addEvent: (event: Omit<ScheduledEvent, "id" | "createdAt">) => void;
+  deleteEvent: (id: string) => void;
   simulateReply: (taskId: string, text: string) => void;
   decideProposal: (id: string, approve: boolean) => void;
   resolveBlocker: (taskId: string, resolution: string, nextStatus: TaskStatus) => void;
@@ -73,6 +84,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [taskDialog, setTaskDialog] = useState<{ open: boolean; task?: Task }>({ open: false });
   const [backend, setBackend] = useState<BackendState>({ state: "unconfigured" });
   const [coordinatorApiKey, setCoordinatorApiKeyState] = useState("");
@@ -90,7 +102,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) setData(JSON.parse(raw) as AppData);
+      if (raw) {
+        const parsed = JSON.parse(raw) as AppData;
+        if (!parsed.events || parsed.events.length === 0) {
+          parsed.events = createDemoData().events || [];
+        }
+        setData(parsed);
+      }
     } catch {
       /* corrupt storage — keep fresh demo data */
     }
@@ -123,6 +141,212 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     !!coordinatorApiKey &&
     !!backend.health.coordinatorAuth?.configured;
 
+  const syncWithBackend = useCallback(async () => {
+    if (!base || !apiReady) return;
+    try {
+      const [participantRes, taskRes, eventRes, msgRes] = await Promise.all([
+        api.listParticipants(base, coordinatorApiKey).catch(() => null),
+        api.listTasks(base, undefined, coordinatorApiKey).catch(() => null),
+        api.listEvents(base, undefined, coordinatorApiKey).catch(() => null),
+        api.listMessages(base, coordinatorApiKey).catch(() => null),
+      ]);
+
+      setData((d) => {
+        let changed = false;
+        let members = d.members;
+        let projects = d.projects;
+        let tasks = d.tasks;
+        let activities = d.activities;
+        let messages = d.messages;
+
+        if (participantRes?.participants) {
+          const participants = participantRes.participants.map((p) => ({
+            id: p.id,
+            name: p.display_name,
+            role: p.role,
+            department: p.department,
+            telegramLinked: p.telegram_linked,
+            backendParticipant: true,
+          }));
+
+          const memberProjectIds = new Map<string, string[]>();
+          for (const participant of participantRes.participants) {
+            for (const membership of participant.project_members || []) {
+              const current = memberProjectIds.get(membership.project_id) ?? [];
+              memberProjectIds.set(membership.project_id, [...current, participant.id]);
+            }
+          }
+
+          const existingParticipantsMap = new Map(participants.map((p) => [p.id, p]));
+          const updatedMembers = d.members.map((m) => {
+            const remote = existingParticipantsMap.get(m.id);
+            if (remote && (m.telegramLinked !== remote.telegramLinked || m.role !== remote.role || m.name !== remote.name)) {
+              changed = true;
+              return { ...m, ...remote };
+            }
+            return m;
+          });
+
+          // Add any new participants
+          for (const p of participants) {
+            if (!updatedMembers.some((m) => m.id === p.id)) {
+              updatedMembers.push(p);
+              changed = true;
+            }
+          }
+          members = updatedMembers;
+
+          projects = d.projects.map((project) => {
+            const mappedIds = memberProjectIds.get(project.id) ?? [];
+            const merged = [
+              ...project.memberIds,
+              ...mappedIds,
+            ].filter((id, index, ids) => ids.indexOf(id) === index);
+            if (merged.length !== project.memberIds.length) {
+              changed = true;
+              return { ...project, memberIds: merged };
+            }
+            return project;
+          });
+        }
+
+        if (taskRes?.tasks) {
+          const statusMap: Record<string, TaskStatus> = {
+            TODO: "Pending",
+            IN_PROGRESS: "In Progress",
+            BLOCKED: "Blocked",
+            COMPLETE: "Complete",
+          };
+
+          const updatedTasks = d.tasks.map((localTask) => {
+            const remote = taskRes.tasks.find((rt) => rt.id === localTask.id);
+            if (!remote) return localTask;
+            const newStatus = statusMap[remote.status] ?? localTask.status;
+            const statusChanged = localTask.status !== newStatus;
+            const blockerChanged = localTask.blocker?.reason !== (remote.blocker ?? undefined);
+            const nextActionChanged = localTask.nextAction !== (remote.next_action || "");
+
+            if (!statusChanged && !blockerChanged && !nextActionChanged) {
+              return localTask;
+            }
+
+            changed = true;
+            return {
+              ...localTask,
+              title: remote.title || localTask.title,
+              description: remote.description ?? localTask.description,
+              ownerId: remote.assignee_id ?? localTask.ownerId,
+              status: newStatus,
+              nextAction: remote.next_action || localTask.nextAction,
+              lastUpdate: remote.updated_at || localTask.lastUpdate,
+              ...(remote.blocker
+                ? {
+                    blocker: {
+                      reason: remote.blocker,
+                      identifiedAt: remote.updated_at,
+                      ...(localTask.blocker?.evidence ? { evidence: localTask.blocker.evidence } : {}),
+                    },
+                  }
+                : {}),
+            };
+          });
+
+          for (const remote of taskRes.tasks) {
+            if (!updatedTasks.some((t) => t.id === remote.id)) {
+              updatedTasks.push({
+                id: remote.id,
+                projectId: remote.project_id,
+                title: remote.title,
+                description: remote.description ?? "",
+                ownerId: remote.assignee_id ?? "",
+                team: members.find((m) => m.id === remote.assignee_id)?.department ?? "Engineering",
+                deadline: remote.due_date ?? "",
+                priority: remote.priority,
+                status: statusMap[remote.status] ?? "Pending",
+                dependsOn: remote.dependencies ?? [],
+                acceptanceCriteria: remote.acceptance_criteria ?? [],
+                nextAction: remote.next_action ?? "",
+                ...(remote.blocker
+                  ? { blocker: { reason: remote.blocker, identifiedAt: remote.updated_at } }
+                  : {}),
+                lastUpdate: remote.updated_at,
+                createdAt: remote.created_at,
+              });
+              changed = true;
+            }
+          }
+          tasks = updatedTasks;
+        }
+
+        if (eventRes?.events) {
+          const existingIds = new Set(d.activities.map((a) => a.id));
+          const newEvents = eventRes.events
+            .filter((ev) => !existingIds.has(ev.id))
+            .map((ev) => {
+              const matchedTask = tasks.find((t) => t.id === ev.id);
+              return {
+                id: ev.id,
+                type: "interpretation" as const,
+                projectId: matchedTask?.projectId || d.projects[0]?.id || "",
+                taskId: matchedTask?.id,
+                actor: "AI coordinator",
+                timestamp: ev.created_at,
+                summary: ev.analysis?.explanation ?? `Task update: ${ev.next_status ?? "verified"}`,
+                ...(ev.previous_status ? { prev: ev.previous_status } : {}),
+                ...(ev.next_status ? { next: ev.next_status } : {}),
+                ...(ev.evidence ? { evidence: ev.evidence } : {}),
+                demo: false,
+              };
+            });
+          if (newEvents.length > 0) {
+            activities = [...newEvents, ...d.activities];
+            changed = true;
+          }
+        }
+
+        if (msgRes?.messages) {
+          const incoming = msgRes.messages.map((m) => ({
+            id: m.id,
+            taskId: m.taskId || "",
+            memberId: m.memberId,
+            direction: m.direction as "in" | "out",
+            text: m.text,
+            timestamp: m.timestamp,
+            delivery: "delivered" as const,
+            demo: false,
+          }));
+          const existingMsgIds = new Set(d.messages.map((m) => m.id));
+          const newMessages = incoming.filter((m) => !existingMsgIds.has(m.id));
+          if (newMessages.length > 0) {
+            messages = [...newMessages, ...d.messages];
+            changed = true;
+          }
+        }
+
+        if (!changed) return d;
+        return {
+          ...d,
+          members,
+          projects,
+          tasks,
+          activities,
+          messages,
+        };
+      });
+    } catch {
+      // background sync is silent
+    }
+  }, [base, coordinatorApiKey, apiReady]);
+
+  useEffect(() => {
+    if (!apiReady) return;
+    void syncWithBackend();
+    const interval = setInterval(() => {
+      void syncWithBackend();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [apiReady, syncWithBackend]);
+
   const store: Store = useMemo(() => {
     const taskOf = (id: string) => data.tasks.find((t) => t.id === id);
     return {
@@ -132,6 +356,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setSelectedProjectId,
       openTaskId,
       setOpenTaskId,
+      calendarOpen,
+      setCalendarOpen,
       taskDialog,
       openTaskDialog: (task) => setTaskDialog({ open: true, ...(task ? { task } : {}) }),
       closeTaskDialog: () => setTaskDialog({ open: false }),
@@ -239,26 +465,90 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       },
       saveProject: (p, isNew) => {
         if (base && apiReady) {
-          const project = {
-            id: p.id,
-            name: p.name,
-            description: p.description,
-            ...(data.members.some((member) => member.id === p.managerId && member.backendParticipant)
-              ? { manager_id: p.managerId }
-              : {}),
-            start_date: p.startDate,
-            target_date: p.targetDate,
-            milestones: p.milestones,
+          const syncAsync = async () => {
+            const memberMap = new Map<string, string>();
+            const backendParticipants = await api.listParticipants(base, coordinatorApiKey).catch(() => ({ participants: [] }));
+            const existingByName = new Map(backendParticipants.participants.map((bp) => [bp.display_name.trim().toLowerCase(), bp]));
+
+            for (const memberId of [p.managerId, ...p.memberIds].filter(Boolean)) {
+              const localMember = data.members.find((m) => m.id === memberId);
+              if (!localMember) continue;
+              const byName = existingByName.get(localMember.name.trim().toLowerCase());
+              if (byName) {
+                memberMap.set(memberId, byName.id);
+                if (
+                  (localMember.role && localMember.role !== byName.role) ||
+                  (localMember.department && localMember.department !== byName.department)
+                ) {
+                  await api.updateParticipant(base, byName.id, {
+                    role: localMember.role,
+                    department: localMember.department,
+                  }, coordinatorApiKey).catch(() => null);
+                }
+              } else if (!localMember.backendParticipant) {
+                try {
+                  const reg = await api.registerParticipant(base, {
+                    project_id: p.id,
+                    display_name: localMember.name,
+                    role: localMember.role || "",
+                    department: localMember.department || "",
+                  }, coordinatorApiKey);
+                  if (reg?.participant?.id) {
+                    memberMap.set(memberId, reg.participant.id);
+                  }
+                } catch {
+                  // ignore
+                }
+              } else {
+                memberMap.set(memberId, memberId);
+              }
+            }
+
+            const mappedManagerId = memberMap.get(p.managerId) || p.managerId;
+            const mappedMemberIds = p.memberIds.map((mId) => memberMap.get(mId) || mId);
+
+            const project = {
+              id: p.id,
+              name: p.name,
+              description: p.description,
+              ...(mappedManagerId ? { manager_id: mappedManagerId } : {}),
+              start_date: p.startDate,
+              target_date: p.targetDate,
+              milestones: p.milestones,
+              member_ids: mappedMemberIds,
+            };
+
+            if (isNew) {
+              await api.createProject(base, project, coordinatorApiKey);
+            } else {
+              await api.updateProject(base, p.id, project, coordinatorApiKey);
+            }
           };
-          const request = isNew
-            ? api.createProject(base, project, coordinatorApiKey)
-            : api.updateProject(base, p.id, project, coordinatorApiKey);
-          void request.catch((error) => toast.error(`Project saved locally; backend sync failed: ${(error as Error).message}`));
+
+          void syncAsync().catch((error) =>
+            toast.error(`Project saved locally; backend sync failed: ${(error as Error).message}`),
+          );
         }
         setData((d) => ({
           ...d,
           projects: isNew ? [...d.projects, p] : d.projects.map((x) => (x.id === p.id ? p : x)),
           activities: act(d, { type: isNew ? "project_created" : "project_updated", actor: CURRENT_USER, projectId: p.id, summary: `${isNew ? "Project created" : "Project updated"}: ${p.name}` }),
+        }));
+      },
+      updateMember: async (id, updates) => {
+        if (base && apiReady) {
+          const member = data.members.find((m) => m.id === id);
+          if (member?.backendParticipant) {
+            await api.updateParticipant(base, id, {
+              ...(updates.name ? { display_name: updates.name } : {}),
+              ...(updates.role !== undefined ? { role: updates.role } : {}),
+              ...(updates.department !== undefined ? { department: updates.department } : {}),
+            }, coordinatorApiKey);
+          }
+        }
+        setData((d) => ({
+          ...d,
+          members: d.members.map((m) => (m.id === id ? { ...m, ...updates } : m)),
         }));
       },
       registerParticipant: async ({ projectId, name, role, department }) => {
@@ -468,6 +758,107 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }));
         toast.info("Demo mode: follow-up recorded locally. No real message was sent.");
       },
+      organizeMeet: async (projectId, meetData) => {
+        const p = data.projects.find((proj) => proj.id === projectId);
+        if (!p) throw new Error("Project not found.");
+        const meetingTitle = (meetData.title || "").trim() || `${p.name} Team Sync`;
+        const roomTag = p.id.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const meetingUrl = (meetData.meetingUrl || "").trim() || `https://meet.jit.si/projectpilot-${roomTag || "room"}-${Date.now().toString(36)}`;
+        const agenda = (meetData.agenda || "").trim();
+
+        if (base && apiReady) {
+          try {
+            const res = await api.organizeMeet(
+              base,
+              projectId,
+              {
+                title: meetingTitle,
+                meeting_url: meetingUrl,
+                agenda,
+                organizer_name: CURRENT_USER,
+              },
+              coordinatorApiKey,
+            );
+
+            setData((d) => ({
+              ...d,
+              activities: act(d, {
+                type: "manual",
+                actor: CURRENT_USER,
+                projectId,
+                summary: `📹 Organized Team Meet: "${meetingTitle}" (${res.delivered_count} Telegram alerts sent)`,
+                evidence: meetingUrl,
+              }),
+            }));
+
+            if (res.delivered_count > 0) {
+              toast.success(`Meeting alert broadcasted to ${res.delivered_count} team members on Telegram!`);
+            } else {
+              toast.info("Meeting created! (No team members currently have linked Telegram accounts).");
+            }
+
+            return res;
+          } catch (err) {
+            toast.error((err as Error).message);
+            throw err;
+          }
+        }
+
+        // Demo fallback
+        setData((d) => ({
+          ...d,
+          activities: act(d, {
+            type: "manual",
+            actor: CURRENT_USER,
+            projectId,
+            summary: `📹 [Demo] Team Meet organized: "${meetingTitle}"`,
+            evidence: meetingUrl,
+            demo: true,
+          }),
+        }));
+        toast.success(`[Demo] Team meet organized for "${meetingTitle}"`);
+        return { success: true, delivered_count: p.memberIds.length, meeting_url: meetingUrl };
+      },
+      addEvent: (ev) => {
+        const id = uid("ev");
+        const newEvent: ScheduledEvent = {
+          ...ev,
+          id,
+          createdAt: now(),
+        };
+        setData((d) => ({
+          ...d,
+          events: [...(d.events || []), newEvent],
+          activities: act(d, {
+            type: "event_scheduled",
+            actor: CURRENT_USER,
+            projectId: ev.projectId,
+            summary: `📅 Scheduled: "${ev.title}" on ${ev.date}${ev.time ? ` at ${ev.time}` : ""}`,
+            evidence: ev.meetingUrl || ev.description || "",
+          }),
+        }));
+        toast.success(`Event "${ev.title}" scheduled!`);
+      },
+      deleteEvent: (id) => {
+        setData((d) => {
+          const target = (d.events || []).find((e) => e.id === id);
+          return {
+            ...d,
+            events: (d.events || []).filter((e) => e.id !== id),
+            ...(target
+              ? {
+                  activities: act(d, {
+                    type: "event_cancelled",
+                    actor: CURRENT_USER,
+                    projectId: target.projectId,
+                    summary: `🗑️ Removed scheduled event: "${target.title}"`,
+                  }),
+                }
+              : {}),
+          };
+        });
+        toast.info("Event removed from schedule.");
+      },
       simulateReply: (taskId, text) => {
         const t = taskOf(taskId);
         if (!t || !text.trim()) return;
@@ -567,13 +958,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             activities: act(d, { type: "task_updated", actor: CURRENT_USER, projectId: t.projectId, taskId, summary: "Next action assigned", prev: t.nextAction, next: action }),
           };
         }),
+      syncWithBackend,
       updateSettings: (s) => setData((d) => ({ ...d, settings: s })),
       resetDemo: () => {
         setData(createDemoData());
         toast.success("Demo data reset.");
       },
     };
-  }, [data, selectedProjectId, openTaskId, taskDialog, backend, checkBackend, base, coordinatorApiKey, setCoordinatorApiKey, apiReady]);
+  }, [data, selectedProjectId, openTaskId, calendarOpen, taskDialog, backend, checkBackend, base, coordinatorApiKey, setCoordinatorApiKey, apiReady, syncWithBackend]);
 
   return <Ctx.Provider value={store}>{children}</Ctx.Provider>;
 }

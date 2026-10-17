@@ -166,3 +166,78 @@ test("model errors are propagated instead of returning a success-shaped result",
     /Gemini unavailable/,
   );
 });
+
+test("matches 'frontend is completed' to assigned frontend task and marks it complete", () => {
+  const frontendTask = {
+    id: "task-fe",
+    title: "Frontend development",
+    status: "IN_PROGRESS",
+    acceptance_criteria: [],
+  };
+  const normalized = normalizeAnalysis(
+    result({
+      classification: "COMPLETE",
+      taskId: frontendTask.id,
+      acceptanceCriteriaMet: true,
+      confidence: 0.95,
+    }),
+    [frontendTask],
+    "frontend is completed",
+    { name: "Sarthak", role: "Frontend Developer" },
+  );
+  assert.equal(normalized.classification, "COMPLETE");
+  assert.equal(normalized.taskId, frontendTask.id);
+});
+
+test("matches 'I have completed frontend development' for member ABC with Frontend Developer role", () => {
+  const uiTask = {
+    id: "task-ui",
+    title: "Develop user interface",
+    description: "Build client portal frontend components",
+    status: "IN_PROGRESS",
+    acceptance_criteria: [],
+  };
+  const normalized = normalizeAnalysis(
+    result({
+      classification: "COMPLETE",
+      taskId: uiTask.id,
+      acceptanceCriteriaMet: true,
+      confidence: 0.92,
+    }),
+    [uiTask],
+    "I have completed frontend development",
+    { name: "ABC", role: "Frontend Developer", department: "Engineering" },
+  );
+  assert.equal(normalized.classification, "COMPLETE");
+  assert.equal(normalized.taskId, uiTask.id);
+});
+
+test("disambiguates frontend task among multiple tasks when ABC says 'I have completed frontend development'", () => {
+  const uiTask = {
+    id: "task-ui",
+    title: "Develop user interface",
+    description: "Build client portal frontend components",
+    status: "IN_PROGRESS",
+    acceptance_criteria: [],
+  };
+  const testTask = {
+    id: "task-qa",
+    title: "Write integration tests",
+    description: "End to end testing",
+    status: "IN_PROGRESS",
+    acceptance_criteria: [],
+  };
+  const normalized = normalizeAnalysis(
+    result({
+      classification: "COMPLETE",
+      taskId: uiTask.id,
+      acceptanceCriteriaMet: true,
+      confidence: 0.9,
+    }),
+    [uiTask, testTask],
+    "I have completed frontend development",
+    { name: "ABC", role: "Frontend Developer", department: "Engineering" },
+  );
+  assert.equal(normalized.classification, "COMPLETE");
+  assert.equal(normalized.taskId, uiTask.id);
+});
