@@ -39,6 +39,11 @@ export const config = {
   maxFollowupsPerDay,
   supabaseUrl: process.env.SUPABASE_URL || "",
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+    
+  n8nAnalyzeUrl: process.env.N8N_ANALYZE_URL || "",
+  n8nLatestUrl: process.env.N8N_LATEST_URL || "",
+  n8nWebhookKey: process.env.N8N_WEBHOOK_KEY || "",
+
 };
 
 export function requireConfigured(value, name) {
