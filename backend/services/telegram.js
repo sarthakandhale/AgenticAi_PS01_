@@ -100,10 +100,33 @@ async function handleText(ctx) {
       analysis.taskId = tasks[0].id;
     }
   }
+
+  // Strict sender-to-assigned-task validation: do not allow modifying tasks not assigned to participant
+  if (analysis.classification !== "UNCLEAR" && analysis.taskId) {
+    const isAssigned = tasks.some((t) => String(t.id) === String(analysis.taskId));
+    if (!isAssigned) {
+      analysis.classification = "UNCLEAR";
+      analysis.taskId = null;
+      analysis.clarificationQuestion = "You are not assigned to that task. Please provide an update for one of your assigned tasks.";
+    }
+  }
+
+  if (analysis.classification === "UNCLEAR") {
+    await ctx.reply(
+      analysis.clarificationQuestion ||
+      (pendingFollowups.length > 1
+        ? `I couldn't tell which task you mean. Please reply directly to the task update message, or name the task.`
+        : "I couldn't confidently match that update to one of your assigned tasks. Please mention the task title or ask your coordinator for help."),
+    );
+    return;
+  }
+
   const selectedFollowup =
     followup ??
     pendingFollowups.find((entry) => String(entry.task_id) === String(analysis.taskId)) ??
     null;
+
+  // Persist update in Supabase and verify BEFORE sending confirmation reply
   try {
     await recordReplyDecision({
       followup: selectedFollowup,
@@ -134,23 +157,15 @@ async function handleText(ctx) {
     }
   }
 
-  if (analysis.classification === "UNCLEAR") {
-    await ctx.reply(
-      analysis.clarificationQuestion ||
-      (pendingFollowups.length > 1
-        ? `I couldn't tell which task you mean. Please reply directly to the task update message, or name the task.`
-        : "I couldn't confidently match that update to one task. Please mention the task title or ask your coordinator for help."),
-    );
-    return;
-  }
   const matchedTask = tasks.find((t) => String(t.id) === String(analysis.taskId));
-  const taskLabel = matchedTask ? `"${matchedTask.title}"` : "your task";
-  const messages = {
-    IN_PROGRESS: `📝 Thanks, ${participant.display_name}! Your progress update on ${taskLabel} has been recorded on the project dashboard.`,
-    BLOCKED: `⚠️ Blocker recorded for ${participant.display_name} on ${taskLabel}: ${analysis.blocker}. It has been flagged on the project dashboard.`,
-    COMPLETE: `✅ Great job, ${participant.display_name}! ${taskLabel} has been marked Complete on the project dashboard.`,
-  };
-  await ctx.reply(messages[analysis.classification]);
+  const taskTitle = matchedTask ? matchedTask.title : "your task";
+  if (analysis.classification === "COMPLETE") {
+    await ctx.reply(`Your task '${taskTitle}' has been marked Completed. The dashboard has been updated.`);
+  } else if (analysis.classification === "IN_PROGRESS") {
+    await ctx.reply(`Your task '${taskTitle}' has been marked In Progress. The dashboard has been updated.`);
+  } else if (analysis.classification === "BLOCKED") {
+    await ctx.reply(`Your task '${taskTitle}' has been marked Blocked: ${analysis.blocker || "Blocker reported"}. The dashboard has been updated.`);
+  }
 }
 
 export async function startTelegramBot() {

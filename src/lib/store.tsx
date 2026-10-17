@@ -3,7 +3,8 @@ import { toast } from "sonner";
 import { createDemoData } from "./demo-data";
 import { api, resolveBackendUrl, type HealthResponse } from "./api";
 import { interpretReplyDemo } from "./rules";
-import type { Activity, AppData, Project, Proposal, ScheduledEvent, Settings, Task, TaskStatus } from "./types";
+import { generateRescueRecommendations } from "./rescue-engine";
+import type { Activity, AppData, AppNotification, Project, Proposal, RescueRecommendation, ScheduledEvent, Settings, Task, TaskDependencyEdge, TaskStatus } from "./types";
 
 const KEY = "projectpilot.demo.v1";
 const CURRENT_USER = "Priya Raman";
@@ -72,9 +73,110 @@ interface Store {
   decideProposal: (id: string, approve: boolean) => void;
   resolveBlocker: (taskId: string, resolution: string, nextStatus: TaskStatus) => void;
   setNextAction: (taskId: string, action: string, resolver?: string) => void;
+  markNotificationRead: (id: string) => Promise<void>;
+  approveRescueAction: (id: string, notes?: string) => void;
+  rejectRescueAction: (id: string) => void;
+  completeRescueAction: (id: string) => void;
+  isAnalyzingDependencies: boolean;
+  analyzeProjectDependencies: (projectId?: string, options?: { silent?: boolean }) => Promise<{ count: number; summary?: string }>;
+  confirmDependency: (prerequisiteTaskId: string, dependentTaskId: string) => Promise<void>;
+  rejectDependency: (prerequisiteTaskId: string, dependentTaskId: string) => Promise<void>;
+  deleteDependency: (prerequisiteTaskId: string, dependentTaskId: string) => Promise<void>;
   logActivity: (a: Omit<Activity, "id" | "timestamp" | "actor" | "demo">) => void;
   updateSettings: (s: Settings) => void;
   resetDemo: () => void;
+}
+
+export function inferDependenciesDemo(tasks: Task[], project?: Project): TaskDependencyEdge[] {
+  const edges: TaskDependencyEdge[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < tasks.length; i++) {
+    for (let j = 0; j < tasks.length; j++) {
+      if (i === j) continue;
+      const a = tasks[i];
+      const b = tasks[j];
+      const aText = `${a.title.toLowerCase()} ${(a.description || "").toLowerCase()} ${a.team.toLowerCase()}`;
+      const bText = `${b.title.toLowerCase()} ${(b.description || "").toLowerCase()} ${b.team.toLowerCase()}`;
+
+      const aIsDb = /\bdatabase\b|\bschema\b|\bmigration\b|data model|\bdb\b|\btables\b|\bpostgres\b|\bsql\b/.test(aText);
+      const aIsDesign = /\bdesign\b|\bfigma\b|\bwireframe\b|\bmockup\b|ui\/ux/.test(aText);
+      const aIsApi = /\bapi\b|\bbackend\b|\bendpoint\b|\bcrud\b|\bcontroller\b|\bserver\b|\bservices\b/.test(aText);
+      const aIsFrontend = /\bfrontend\b|\bui\b|\bdashboard\b|\bcomponent\b|\bscreen\b|\bclient\b|\breact\b/.test(aText);
+
+      const bIsApi = /\bapi\b|\bbackend\b|\bendpoint\b|\bcrud\b|\bcontroller\b|\bserver\b|\bservices\b/.test(bText);
+      const bIsFrontend = /\bfrontend\b|\bui\b|\bdashboard\b|\bcomponent\b|\bscreen\b|\bclient\b|\breact\b/.test(bText);
+      const bIsQa = /\bqa\b|\btesting\b|test suite|end-to-end|\be2e\b|\baudit\b|\bverification\b/.test(bText);
+
+      let matches = false;
+      let reason = "";
+      let confidence = 0.85;
+
+      if (aIsDb && (bIsApi || bIsFrontend)) {
+        matches = true;
+        reason = `Database schema and persistence model from '${a.title}' must be deployed before '${b.title}' can integrate.`;
+        confidence = 0.94;
+      } else if (aIsDesign && bIsFrontend) {
+        matches = true;
+        reason = `Visual specifications and wireframes from '${a.title}' are required to implement components in '${b.title}'.`;
+        confidence = 0.88;
+      } else if (aIsApi && (bIsFrontend || bIsQa)) {
+        matches = true;
+        reason = `API endpoints and contracts from '${a.title}' must be active before client integration and QA validation in '${b.title}'.`;
+        confidence = 0.91;
+      } else if (aIsFrontend && bIsQa) {
+        matches = true;
+        reason = `User interface in '${a.title}' must be built before full end-to-end user verification in '${b.title}'.`;
+        confidence = 0.86;
+      }
+
+      // Milestone phasing rule: earlier milestone deliverables precede subsequent milestones
+      const milestones = Array.isArray(project?.milestones) ? project.milestones : [];
+      if (milestones.length > 0 && !matches) {
+        const aMsIdx = milestones.findIndex((m) =>
+          (m.name && aText.includes(m.name.toLowerCase())) ||
+          (a.deadline && m.date && a.deadline <= m.date)
+        );
+        const bMsIdx = milestones.findIndex((m) =>
+          (m.name && bText.includes(m.name.toLowerCase())) ||
+          (b.deadline && m.date && b.deadline > m.date)
+        );
+        if (aMsIdx !== -1 && bMsIdx !== -1 && aMsIdx < bMsIdx) {
+          matches = true;
+          const mA = milestones[aMsIdx];
+          const mB = milestones[bMsIdx];
+          reason = `Milestone phasing: Task '${a.title}' aligns with milestone '${mA.name}' which must be achieved before subsequent milestone '${mB.name}' task '${b.title}'.`;
+          confidence = 0.89;
+        }
+      }
+
+      if (matches) {
+        const pairKey = `${a.id}->${b.id}`;
+        if (!seen.has(pairKey) && !(b.dependsOn || []).includes(a.id)) {
+          seen.add(pairKey);
+          edges.push({
+            id: `edge-${a.id}-${b.id}`,
+            projectId: a.projectId,
+            prerequisiteTaskId: a.id,
+            prerequisiteTitle: a.title,
+            prerequisiteStatus: a.status,
+            prerequisiteDeadline: a.deadline,
+            dependentTaskId: b.id,
+            dependentTitle: b.title,
+            dependentStatus: b.status,
+            dependentDeadline: b.deadline,
+            confidence,
+            explanation: reason,
+            evidence: `Derived from matching technical deliverables between tasks.`,
+            status: "PROPOSED",
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+    }
+  }
+
+  return edges;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -88,6 +190,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [taskDialog, setTaskDialog] = useState<{ open: boolean; task?: Task }>({ open: false });
   const [backend, setBackend] = useState<BackendState>({ state: "unconfigured" });
   const [coordinatorApiKey, setCoordinatorApiKeyState] = useState("");
+  const [isAnalyzingDependencies, setIsAnalyzingDependencies] = useState(false);
 
   useEffect(() => {
     setCoordinatorApiKeyState(sessionStorage.getItem("projectpilot.coordinator-key") ?? "");
@@ -107,6 +210,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (!parsed.events || parsed.events.length === 0) {
           parsed.events = createDemoData().events || [];
         }
+        if (!parsed.notifications) parsed.notifications = [];
+        if (!parsed.rescueActions) parsed.rescueActions = [];
+        if (!parsed.taskDependencies) parsed.taskDependencies = [];
         setData(parsed);
       }
     } catch {
@@ -114,6 +220,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
     setHydrated(true);
   }, []);
+
+  // Automatically update and maintain rescue recommendations as task states evolve
+  useEffect(() => {
+    setData((d) => {
+      const computed = generateRescueRecommendations(d.tasks, d.members, d.rescueActions || []);
+      if (JSON.stringify(computed) !== JSON.stringify(d.rescueActions || [])) {
+        return { ...d, rescueActions: computed };
+      }
+      return d;
+    });
+  }, [data.tasks, data.members]);
   useEffect(() => {
     if (hydrated) localStorage.setItem(KEY, JSON.stringify(data));
   }, [data, hydrated]);
@@ -144,11 +261,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const syncWithBackend = useCallback(async () => {
     if (!base || !apiReady) return;
     try {
-      const [participantRes, taskRes, eventRes, msgRes] = await Promise.all([
+      const [participantRes, taskRes, eventRes, msgRes, notifRes, depRes] = await Promise.all([
         api.listParticipants(base, coordinatorApiKey).catch(() => null),
         api.listTasks(base, undefined, coordinatorApiKey).catch(() => null),
         api.listEvents(base, undefined, coordinatorApiKey).catch(() => null),
         api.listMessages(base, coordinatorApiKey).catch(() => null),
+        api.listNotifications(base, undefined, coordinatorApiKey).catch(() => null),
+        Promise.all(
+          data.projects.map((p) => api.listDependencies(base, p.id, coordinatorApiKey).catch(() => null)),
+        ),
       ]);
 
       setData((d) => {
@@ -158,6 +279,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         let tasks = d.tasks;
         let activities = d.activities;
         let messages = d.messages;
+        let notifications = d.notifications || [];
+        let taskDependencies = d.taskDependencies || [];
 
         if (participantRes?.participants) {
           const participants = participantRes.participants.map((p) => ({
@@ -225,8 +348,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const statusChanged = localTask.status !== newStatus;
             const blockerChanged = localTask.blocker?.reason !== (remote.blocker ?? undefined);
             const nextActionChanged = localTask.nextAction !== (remote.next_action || "");
+            const remoteDeps = remote.dependencies || [];
+            const depsChanged = JSON.stringify(localTask.dependsOn || []) !== JSON.stringify(remoteDeps);
 
-            if (!statusChanged && !blockerChanged && !nextActionChanged) {
+            if (!statusChanged && !blockerChanged && !nextActionChanged && !depsChanged) {
               return localTask;
             }
 
@@ -237,6 +362,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               description: remote.description ?? localTask.description,
               ownerId: remote.assignee_id ?? localTask.ownerId,
               status: newStatus,
+              dependsOn: remoteDeps,
               nextAction: remote.next_action || localTask.nextAction,
               lastUpdate: remote.updated_at || localTask.lastUpdate,
               ...(remote.blocker
@@ -323,6 +449,57 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
         }
 
+        if (notifRes?.notifications) {
+          const existingNotifIds = new Set((d.notifications || []).map((n) => n.id));
+          const incomingNotifs = notifRes.notifications
+            .filter((n) => !existingNotifIds.has(n.id))
+            .map((n) => ({
+              id: n.id,
+              recipientId: n.recipient_id,
+              projectId: n.project_id,
+              title: n.title,
+              message: n.message,
+              read: n.read,
+              createdAt: n.created_at,
+            }));
+          if (incomingNotifs.length > 0) {
+            notifications = [...incomingNotifs, ...notifications];
+            changed = true;
+          }
+        }
+
+        if (Array.isArray(depRes)) {
+          const allRemoteDeps: TaskDependencyEdge[] = [];
+          for (const res of depRes) {
+            if (res?.dependencies) {
+              for (const dep of res.dependencies) {
+                allRemoteDeps.push({
+                  id: dep.id,
+                  projectId: dep.projectId,
+                  prerequisiteTaskId: dep.prerequisiteTaskId,
+                  prerequisiteTitle: dep.prerequisiteTitle,
+                  prerequisiteStatus: (dep.prerequisiteStatus as TaskStatus) || "Pending",
+                  prerequisiteDeadline: dep.prerequisiteDeadline,
+                  dependentTaskId: dep.dependentTaskId,
+                  dependentTitle: dep.dependentTitle,
+                  dependentStatus: (dep.dependentStatus as TaskStatus) || "Pending",
+                  dependentDeadline: dep.dependentDeadline,
+                  confidence: dep.confidence,
+                  explanation: dep.explanation,
+                  evidence: dep.evidence,
+                  status: dep.status,
+                  createdAt: dep.createdAt,
+                  updatedAt: dep.updatedAt,
+                });
+              }
+            }
+          }
+          if (allRemoteDeps.length > 0 || (taskDependencies.length > 0 && allRemoteDeps.length === 0)) {
+            taskDependencies = allRemoteDeps;
+            changed = true;
+          }
+        }
+
         if (!changed) return d;
         return {
           ...d,
@@ -331,12 +508,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           tasks,
           activities,
           messages,
+          notifications,
+          taskDependencies,
         };
       });
     } catch {
       // background sync is silent
     }
-  }, [base, coordinatorApiKey, apiReady]);
+  }, [base, coordinatorApiKey, apiReady, data.projects]);
 
   useEffect(() => {
     if (!apiReady) return;
@@ -346,6 +525,92 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }, 3000);
     return () => clearInterval(interval);
   }, [apiReady, syncWithBackend]);
+
+  const runDependencyAnalysis = useCallback(
+    async (targetProjectId?: string, options: { silent?: boolean } = {}) => {
+      const projId = targetProjectId || (selectedProjectId !== "all" ? selectedProjectId : data.projects[0]?.id);
+      if (!projId) {
+        if (!options.silent) toast.error("Please select a project to analyze dependencies.");
+        return { count: 0 };
+      }
+      const project = data.projects.find((p) => p.id === projId) || data.projects[0];
+      setIsAnalyzingDependencies(true);
+      try {
+        if (base && apiReady) {
+          const res = await api.analyzeDependencies(base, projId, coordinatorApiKey);
+          if (res?.dependencies) {
+            const mapped: TaskDependencyEdge[] = res.dependencies.map((d) => ({
+              id: d.id,
+              projectId: d.projectId,
+              prerequisiteTaskId: d.prerequisiteTaskId,
+              prerequisiteTitle: d.prerequisiteTitle,
+              prerequisiteStatus: (d.prerequisiteStatus as TaskStatus) || "Pending",
+              prerequisiteDeadline: d.prerequisiteDeadline,
+              dependentTaskId: d.dependentTaskId,
+              dependentTitle: d.dependentTitle,
+              dependentStatus: (d.dependentStatus as TaskStatus) || "Pending",
+              dependentDeadline: d.dependentDeadline,
+              confidence: d.confidence,
+              explanation: d.explanation,
+              evidence: d.evidence,
+              status: d.status,
+              createdAt: d.createdAt,
+              updatedAt: d.updatedAt,
+            }));
+            setData((prev) => ({
+              ...prev,
+              taskDependencies: mapped,
+              activities: act(prev, {
+                type: "interpretation",
+                actor: "AI coordinator",
+                projectId: projId,
+                summary: `AI analyzed dependencies for "${project?.name || projId}": ${mapped.filter((m) => m.status === 'PROPOSED').length} proposed.`,
+                evidence: res.summary,
+              }),
+            }));
+            void syncWithBackend();
+            const proposedCount = mapped.filter((m) => m.status === "PROPOSED").length;
+            if (!options.silent) {
+              toast.success(`AI Dependency Analysis complete: ${proposedCount} dependencies proposed for review.`);
+            }
+            return { count: proposedCount, summary: res.summary };
+          }
+        }
+
+        // Demo Mode / Instant Local Fallback
+        const projTasks = data.tasks.filter((t) => t.projectId === projId);
+        const inferred = inferDependenciesDemo(projTasks, project);
+        setData((prev) => {
+          const existingNonProposed = (prev.taskDependencies || []).filter(
+            (d) => d.projectId === projId && d.status !== "PROPOSED",
+          );
+          const otherProjectDeps = (prev.taskDependencies || []).filter((d) => d.projectId !== projId);
+          return {
+            ...prev,
+            taskDependencies: [...otherProjectDeps, ...existingNonProposed, ...inferred],
+            activities: act(prev, {
+              type: "interpretation",
+              actor: "AI coordinator",
+              projectId: projId,
+              summary: `AI analyzed dependencies for "${project?.name}": ${inferred.length} proposed.`,
+              evidence: "Inferred from task technical roles, architecture layers, and deliverables.",
+            }),
+          };
+        });
+        if (!options.silent) {
+          toast.success(`AI Dependency Analysis complete: ${inferred.length} dependencies proposed.`);
+        }
+        return { count: inferred.length, summary: "Heuristic AI inference completed." };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!options.silent) toast.error(`Dependency analysis failed: ${message}`);
+        return { count: 0, summary: message };
+      } finally {
+        setIsAnalyzingDependencies(false);
+      }
+    },
+    [base, apiReady, coordinatorApiKey, selectedProjectId, data.projects, data.tasks, syncWithBackend],
+  );
 
   const store: Store = useMemo(() => {
     const taskOf = (id: string) => data.tasks.find((t) => t.id === id);
@@ -427,8 +692,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const next = { ...t, lastUpdate: now() };
           return { ...d, activities, tasks: isNew ? [...d.tasks, next] : d.tasks.map((x) => (x.id === t.id ? next : x)) };
         });
+
+        // Real-time: automatically infer dependencies when task is created or updated
+        setTimeout(() => {
+          void runDependencyAnalysis(t.projectId, { silent: true });
+        }, 300);
       },
       deleteTask: (id) => {
+        const deletedProjId = data.tasks.find((t) => t.id === id)?.projectId;
         if (base && apiReady) {
           void api.deleteTask(base, id, coordinatorApiKey).catch((error) =>
             toast.error(`Task removed locally; backend deletion failed: ${(error as Error).message}`),
@@ -438,6 +709,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ...d,
           tasks: d.tasks.filter((t) => t.id !== id).map((t) => ({ ...t, dependsOn: t.dependsOn.filter((x) => x !== id) })),
         }));
+
+        // Real-time: update dependencies when task is removed
+        setTimeout(() => {
+          void runDependencyAnalysis(deletedProjId, { silent: true });
+        }, 300);
       },
       setStatus: (id, status, note) => {
         if (status === "Blocked" && !note?.trim()) {
@@ -456,10 +732,31 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const t = d.tasks.find((x) => x.id === id);
           if (!t || t.status === status) return d;
           const blocker = status === "Blocked" ? t.blocker ?? { reason: note || "Reason not yet recorded", identifiedAt: now() } : t.blocker && !t.blocker.resolvedAt && t.status === "Blocked" ? { ...t.blocker, resolvedAt: now(), resolution: note || "Status changed manually" } : t.blocker;
+          let rescueActions = d.rescueActions || [];
+          let activities = act(d, { type: "status_changed", actor: CURRENT_USER, projectId: t.projectId, taskId: id, summary: "Status changed manually", prev: t.status, next: status });
+
+          // Feature 3: Automatically complete rescue actions when upstream task finishes
+          if (status === "Complete") {
+            const hasAssociated = rescueActions.some((ra) => ra.delayedTaskId === id && ra.status !== "completed");
+            if (hasAssociated) {
+              rescueActions = rescueActions.map((ra) =>
+                ra.delayedTaskId === id ? { ...ra, status: "completed" as const, updatedAt: now() } : ra,
+              );
+              activities = act({ ...d, activities }, {
+                type: "task_updated",
+                actor: CURRENT_USER,
+                projectId: t.projectId,
+                taskId: id,
+                summary: `Prerequisite "${t.title}" completed: dependency rescue action marked resolved.`,
+              });
+            }
+          }
+
           return {
             ...d,
             tasks: d.tasks.map((x) => (x.id === id ? { ...x, status, lastUpdate: now(), ...(blocker ? { blocker } : {}) } : x)),
-            activities: act(d, { type: "status_changed", actor: CURRENT_USER, projectId: t.projectId, taskId: id, summary: "Status changed manually", prev: t.status, next: status }),
+            rescueActions,
+            activities,
           };
         });
       },
@@ -529,11 +826,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             toast.error(`Project saved locally; backend sync failed: ${(error as Error).message}`),
           );
         }
-        setData((d) => ({
-          ...d,
-          projects: isNew ? [...d.projects, p] : d.projects.map((x) => (x.id === p.id ? p : x)),
-          activities: act(d, { type: isNew ? "project_created" : "project_updated", actor: CURRENT_USER, projectId: p.id, summary: `${isNew ? "Project created" : "Project updated"}: ${p.name}` }),
-        }));
+        setData((d) => {
+          const prev = d.projects.find((x) => x.id === p.id);
+          const prevMemberIds = prev?.memberIds || [];
+          const newlyAssigned = isNew
+            ? p.memberIds
+            : p.memberIds.filter((mId) => !prevMemberIds.includes(mId));
+
+          const newNotifs: AppNotification[] = newlyAssigned.map((mId) => ({
+            id: uid("notif"),
+            recipientId: mId,
+            projectId: p.id,
+            title: "New project assigned to you",
+            message: `New project assigned to you: ${p.name}. Assigned by: Project Coordinator. Open your dashboard to view the project details and tasks.`,
+            read: false,
+            createdAt: now(),
+          }));
+
+          return {
+            ...d,
+            projects: isNew ? [...d.projects, p] : d.projects.map((x) => (x.id === p.id ? p : x)),
+            notifications: [...newNotifs, ...(d.notifications || [])],
+            activities: act(d, { type: isNew ? "project_created" : "project_updated", actor: CURRENT_USER, projectId: p.id, summary: `${isNew ? "Project created" : "Project updated"}: ${p.name}` }),
+          };
+        });
+
+        // Real-time: automatically infer dependencies when project is created or updated
+        setTimeout(() => {
+          void runDependencyAnalysis(p.id, { silent: true });
+        }, 300);
       },
       updateMember: async (id, updates) => {
         if (base && apiReady) {
@@ -959,13 +1280,211 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           };
         }),
       syncWithBackend,
+      markNotificationRead: async (id: string) => {
+        if (base && apiReady) {
+          void api.markNotificationRead(base, id, undefined, coordinatorApiKey).catch(() => null);
+        }
+        setData((d) => ({
+          ...d,
+          notifications: (d.notifications || []).map((n) => (n.id === id ? { ...n, read: true } : n)),
+        }));
+      },
+      approveRescueAction: (id: string, notes?: string) => {
+        setData((d) => {
+          const action = (d.rescueActions || []).find((a) => a.id === id);
+          if (!action) return d;
+          const delayedTask = d.tasks.find((t) => t.id === action.delayedTaskId);
+          const updatedActions = (d.rescueActions || []).map((a) =>
+            a.id === id
+              ? {
+                  ...a,
+                  status: "approved" as const,
+                  mockContractDetails: notes || a.mockContractDetails || "Agreed mock contract in place",
+                  updatedAt: now(),
+                }
+              : a,
+          );
+          return {
+            ...d,
+            rescueActions: updatedActions,
+            activities: act(d, {
+              type: "proposal_approved",
+              actor: CURRENT_USER,
+              projectId: delayedTask?.projectId,
+              taskId: delayedTask?.id,
+              summary: `Recovery strategy approved: ${action.title}`,
+              evidence: notes || action.rationale,
+            }),
+          };
+        });
+        toast.success("Recovery strategy approved. Downstream team notified.");
+      },
+      rejectRescueAction: (id: string) => {
+        setData((d) => {
+          const action = (d.rescueActions || []).find((a) => a.id === id);
+          if (!action) return d;
+          const delayedTask = d.tasks.find((t) => t.id === action.delayedTaskId);
+          return {
+            ...d,
+            rescueActions: (d.rescueActions || []).map((a) =>
+              a.id === id ? { ...a, status: "rejected" as const, updatedAt: now() } : a,
+            ),
+            activities: act(d, {
+              type: "proposal_rejected",
+              actor: CURRENT_USER,
+              projectId: delayedTask?.projectId,
+              taskId: delayedTask?.id,
+              summary: `Recovery recommendation rejected: ${action.title}`,
+            }),
+          };
+        });
+        toast.info("Recovery recommendation rejected.");
+      },
+      completeRescueAction: (id: string) => {
+        setData((d) => {
+          const action = (d.rescueActions || []).find((a) => a.id === id);
+          if (!action) return d;
+          const delayedTask = d.tasks.find((t) => t.id === action.delayedTaskId);
+          return {
+            ...d,
+            rescueActions: (d.rescueActions || []).map((a) =>
+              a.id === id ? { ...a, status: "completed" as const, updatedAt: now() } : a,
+            ),
+            activities: act(d, {
+              type: "task_updated",
+              actor: CURRENT_USER,
+              projectId: delayedTask?.projectId,
+              taskId: delayedTask?.id,
+              summary: `Recovery action marked completed: ${action.title}`,
+            }),
+          };
+        });
+        toast.success("Recovery action marked completed.");
+      },
+      isAnalyzingDependencies,
+      analyzeProjectDependencies: runDependencyAnalysis,
+      confirmDependency: async (prerequisiteTaskId: string, dependentTaskId: string) => {
+        const depTask = data.tasks.find((t) => t.id === dependentTaskId);
+        const prereqTask = data.tasks.find((t) => t.id === prerequisiteTaskId);
+        const projId = depTask?.projectId || selectedProjectId;
+
+        if (base && apiReady && projId) {
+          try {
+            await api.confirmDependency(base, projId, { prerequisiteTaskId, dependentTaskId }, coordinatorApiKey);
+          } catch (err: unknown) {
+            console.warn("Backend confirmDependency failed, applying locally:", err);
+          }
+        }
+
+        setData((prev) => {
+          const updatedDeps = (prev.taskDependencies || []).map((edge) => {
+            if (edge.prerequisiteTaskId === prerequisiteTaskId && edge.dependentTaskId === dependentTaskId) {
+              return { ...edge, status: "CONFIRMED" as const, updatedAt: now() };
+            }
+            return edge;
+          });
+
+          const updatedTasks = prev.tasks.map((t) => {
+            if (t.id === dependentTaskId) {
+              const curDeps = t.dependsOn || [];
+              if (!curDeps.includes(prerequisiteTaskId)) {
+                return { ...t, dependsOn: [...curDeps, prerequisiteTaskId], lastUpdate: now() };
+              }
+            }
+            return t;
+          });
+
+          return {
+            ...prev,
+            taskDependencies: updatedDeps,
+            tasks: updatedTasks,
+            activities: act(prev, {
+              type: "proposal_approved",
+              actor: CURRENT_USER,
+              projectId: projId,
+              taskId: dependentTaskId,
+              summary: `Confirmed dependency: "${prereqTask?.title || prerequisiteTaskId}" → "${depTask?.title || dependentTaskId}"`,
+            }),
+          };
+        });
+        toast.success(`Dependency confirmed: "${prereqTask?.title || prerequisiteTaskId}" → "${depTask?.title || dependentTaskId}"`);
+      },
+      rejectDependency: async (prerequisiteTaskId: string, dependentTaskId: string) => {
+        const depTask = data.tasks.find((t) => t.id === dependentTaskId);
+        const prereqTask = data.tasks.find((t) => t.id === prerequisiteTaskId);
+        const projId = depTask?.projectId || selectedProjectId;
+
+        if (base && apiReady && projId) {
+          try {
+            await api.rejectDependency(base, projId, { prerequisiteTaskId, dependentTaskId }, coordinatorApiKey);
+          } catch (err: unknown) {
+            console.warn("Backend rejectDependency failed, applying locally:", err);
+          }
+        }
+
+        setData((prev) => {
+          const updatedDeps = (prev.taskDependencies || []).map((edge) => {
+            if (edge.prerequisiteTaskId === prerequisiteTaskId && edge.dependentTaskId === dependentTaskId) {
+              return { ...edge, status: "REJECTED" as const, updatedAt: now() };
+            }
+            return edge;
+          });
+
+          const updatedTasks = prev.tasks.map((t) => {
+            if (t.id === dependentTaskId) {
+              return { ...t, dependsOn: (t.dependsOn || []).filter((d) => d !== prerequisiteTaskId), lastUpdate: now() };
+            }
+            return t;
+          });
+
+          return {
+            ...prev,
+            taskDependencies: updatedDeps,
+            tasks: updatedTasks,
+            activities: act(prev, {
+              type: "proposal_rejected",
+              actor: CURRENT_USER,
+              projectId: projId,
+              taskId: dependentTaskId,
+              summary: `Rejected dependency proposal: "${prereqTask?.title || prerequisiteTaskId}" → "${depTask?.title || dependentTaskId}"`,
+            }),
+          };
+        });
+        toast.info("Dependency proposal rejected.");
+      },
+      deleteDependency: async (prerequisiteTaskId: string, dependentTaskId: string) => {
+        const depTask = data.tasks.find((t) => t.id === dependentTaskId);
+        const projId = depTask?.projectId || selectedProjectId;
+
+        if (base && apiReady && projId) {
+          try {
+            await api.deleteDependency(base, projId, { prerequisiteTaskId, dependentTaskId }, coordinatorApiKey);
+          } catch (err: unknown) {
+            console.warn("Backend deleteDependency failed, applying locally:", err);
+          }
+        }
+
+        setData((prev) => ({
+          ...prev,
+          taskDependencies: (prev.taskDependencies || []).filter(
+            (d) => !(d.prerequisiteTaskId === prerequisiteTaskId && d.dependentTaskId === dependentTaskId),
+          ),
+          tasks: prev.tasks.map((t) => {
+            if (t.id === dependentTaskId) {
+              return { ...t, dependsOn: (t.dependsOn || []).filter((id) => id !== prerequisiteTaskId), lastUpdate: now() };
+            }
+            return t;
+          }),
+        }));
+        toast.success("Dependency removed.");
+      },
       updateSettings: (s) => setData((d) => ({ ...d, settings: s })),
       resetDemo: () => {
         setData(createDemoData());
         toast.success("Demo data reset.");
       },
     };
-  }, [data, selectedProjectId, openTaskId, calendarOpen, taskDialog, backend, checkBackend, base, coordinatorApiKey, setCoordinatorApiKey, apiReady, syncWithBackend]);
+  }, [data, selectedProjectId, openTaskId, calendarOpen, taskDialog, backend, checkBackend, base, coordinatorApiKey, setCoordinatorApiKey, apiReady, syncWithBackend, isAnalyzingDependencies]);
 
   return <Ctx.Provider value={store}>{children}</Ctx.Provider>;
 }

@@ -382,3 +382,277 @@ export async function analyseReply(reply, tasks = [], participantContext = null)
 }
 
 export { normalizeAnalysis };
+
+export const DependencyEdgeSchema = z.object({
+  prerequisiteTaskId: z.string(),
+  dependentTaskId: z.string(),
+  prerequisiteTitle: z.string().optional(),
+  dependentTitle: z.string().optional(),
+  explanation: z.string().default("Logical prerequisite identified based on task specifications."),
+  confidence: z.number().default(0.85),
+  evidence: z.string().nullable().optional(),
+});
+
+export const DependencyAnalysisResultSchema = z.object({
+  dependencies: z.array(DependencyEdgeSchema).default([]),
+  independentTaskIds: z.array(z.string()).default([]),
+  summary: z.string().optional(),
+});
+
+const DependencyState = Annotation.Root({
+  project: Annotation(),
+  tasks: Annotation(),
+  analysis: Annotation(),
+});
+
+export function normalizeDependencies(result, tasks) {
+  const taskMap = new Map();
+  for (const t of tasks) {
+    taskMap.set(String(t.id).trim(), t);
+    if (t.client_id) taskMap.set(String(t.client_id).trim(), t);
+  }
+
+  const validEdges = [];
+  const seenPairs = new Set();
+  const involvedTaskIds = new Set();
+
+  for (const edge of result.dependencies || []) {
+    const rawPrereq = String(edge.prerequisiteTaskId || "").trim();
+    const rawDep = String(edge.dependentTaskId || "").trim();
+    if (!rawPrereq || !rawDep || rawPrereq === rawDep) continue;
+
+    const prereqTask = taskMap.get(rawPrereq);
+    const depTask = taskMap.get(rawDep);
+    if (!prereqTask || !depTask) continue;
+
+    const prereqId = String(prereqTask.id);
+    const depId = String(depTask.id);
+    const pairKey = `${prereqId}->${depId}`;
+    if (seenPairs.has(pairKey)) continue;
+    seenPairs.add(pairKey);
+
+    validEdges.push({
+      prerequisiteTaskId: prereqId,
+      prerequisiteTitle: prereqTask.title,
+      dependentTaskId: depId,
+      dependentTitle: depTask.title,
+      explanation: String(edge.explanation || "Logical prerequisite identified based on task specifications.").slice(0, 500),
+      confidence: Math.max(0, Math.min(1, Number(edge.confidence) || 0.8)),
+      evidence: edge.evidence ? String(edge.evidence).slice(0, 1000) : null,
+    });
+
+    involvedTaskIds.add(prereqId);
+    involvedTaskIds.add(depId);
+  }
+
+  const allTaskIds = tasks.map((t) => String(t.id));
+  const independentTaskIds = allTaskIds.filter((id) => !involvedTaskIds.has(id));
+
+  return {
+    dependencies: validEdges,
+    independentTaskIds,
+    summary: result.summary || `Identified ${validEdges.length} logical task dependencies across ${tasks.length} project tasks.`,
+  };
+}
+
+export function inferDependenciesHeuristic(project, tasks) {
+  const edges = [];
+  const seen = new Set();
+  const lowerTasks = tasks.map((t) => ({
+    ...t,
+    idStr: String(t.id),
+    titleLower: (t.title || "").toLowerCase(),
+    descLower: (t.description || "").toLowerCase(),
+    roleLower: (t.assigneeRole || t.role || "").toLowerCase(),
+  }));
+
+  for (let i = 0; i < lowerTasks.length; i++) {
+    for (let j = 0; j < lowerTasks.length; j++) {
+      if (i === j) continue;
+      const a = lowerTasks[i];
+      const b = lowerTasks[j];
+      const aText = `${a.titleLower} ${a.descLower} ${a.roleLower}`;
+      const bText = `${b.titleLower} ${b.descLower} ${b.roleLower}`;
+
+      let matches = false;
+      let reason = "";
+      let confidence = 0.85;
+
+      const aIsDb = /\bdatabase\b|\bschema\b|\bmigration\b|data model|\bdb\b|\btables\b|\bpostgres\b|\bsql\b/.test(aText);
+      const aIsDesign = /\bdesign\b|\bfigma\b|\bwireframe\b|\bmockup\b|ui\/ux/.test(aText);
+      const aIsApi = /\bapi\b|\bbackend\b|\bendpoint\b|\bcrud\b|\bcontroller\b|\bserver\b|\bservices\b/.test(aText);
+      const aIsFrontend = /\bfrontend\b|\bui\b|\bdashboard\b|\bcomponent\b|\bscreen\b|\bclient\b|\breact\b/.test(aText);
+
+      const bIsApi = /\bapi\b|\bbackend\b|\bendpoint\b|\bcrud\b|\bcontroller\b|\bserver\b|\bservices\b/.test(bText);
+      const bIsFrontend = /\bfrontend\b|\bui\b|\bdashboard\b|\bcomponent\b|\bscreen\b|\bclient\b|\breact\b/.test(bText);
+      const bIsQa = /\bqa\b|\btesting\b|test suite|end-to-end|\be2e\b|\baudit\b|\bverification\b/.test(bText);
+
+      if (aIsDb && (bIsApi || bIsFrontend)) {
+        matches = true;
+        reason = `Data schema and persistence in '${a.title}' is a foundational prerequisite for API and UI integration in '${b.title}'.`;
+        confidence = 0.92;
+      } else if (aIsDesign && bIsFrontend) {
+        matches = true;
+        reason = `Visual mockups and UI layout design from '${a.title}' are required before implementing frontend components in '${b.title}'.`;
+        confidence = 0.88;
+      } else if (aIsApi && (bIsFrontend || bIsQa)) {
+        matches = true;
+        reason = `Backend API endpoints and contracts from '${a.title}' must be active before client consumption and QA validation in '${b.title}'.`;
+        confidence = 0.9;
+      } else if (aIsFrontend && bIsQa) {
+        matches = true;
+        reason = `User interface implementation in '${a.title}' must be complete before conducting end-to-end user testing in '${b.title}'.`;
+        confidence = 0.85;
+      }
+
+      // Milestone phasing rule: earlier milestone deliverables precede subsequent milestones
+      const milestones = Array.isArray(project?.milestones) ? project.milestones : [];
+      if (milestones.length > 0 && !matches) {
+        const aMsIdx = milestones.findIndex((m) =>
+          (m.name && aText.includes(m.name.toLowerCase())) ||
+          (a.deadline && m.date && a.deadline <= m.date)
+        );
+        const bMsIdx = milestones.findIndex((m) =>
+          (m.name && bText.includes(m.name.toLowerCase())) ||
+          (b.deadline && m.date && b.deadline > m.date)
+        );
+        if (aMsIdx !== -1 && bMsIdx !== -1 && aMsIdx < bMsIdx) {
+          matches = true;
+          const mA = milestones[aMsIdx];
+          const mB = milestones[bMsIdx];
+          reason = `Milestone phasing: Task '${a.title}' aligns with milestone '${mA.name}' which must be achieved before subsequent milestone '${mB.name}' task '${b.title}'.`;
+          confidence = 0.89;
+        }
+      }
+
+      if (matches) {
+        const key = `${a.idStr}->${b.idStr}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          edges.push({
+            prerequisiteTaskId: a.idStr,
+            prerequisiteTitle: a.title,
+            dependentTaskId: b.idStr,
+            dependentTitle: b.title,
+            explanation: reason,
+            confidence,
+            evidence: `Derived from matching technical roles, milestone phases, and architectural scopes in task specifications.`,
+          });
+        }
+      }
+    }
+  }
+
+  const involved = new Set(edges.flatMap((e) => [e.prerequisiteTaskId, e.dependentTaskId]));
+  const independentTaskIds = tasks.map((t) => String(t.id)).filter((id) => !involved.has(id));
+
+  return {
+    dependencies: edges,
+    independentTaskIds,
+    summary: `Heuristically analyzed ${tasks.length} tasks and identified ${edges.length} logical prerequisite flows.`,
+  };
+}
+
+export function buildDependencyGraph({ model } = {}) {
+  const infer = async (state) => {
+    if (!model) {
+      if (!process.env.GOOGLE_API_KEY) {
+        return { analysis: inferDependenciesHeuristic(state.project, state.tasks) };
+      }
+      model = new ChatGoogleGenerativeAI({
+        model: process.env.GEMINI_MODEL || "gemini-3.8-flash",
+        apiKey: process.env.GOOGLE_API_KEY,
+        temperature: 0.1,
+        timeout: 30_000,
+      }).withStructuredOutput(DependencyAnalysisResultSchema, { name: "task_dependency_analysis" });
+    }
+
+    const systemPrompt = [
+      "You are an expert Principal Systems Architect and Technical Program Manager analyzing task dependencies for an engineering project.",
+      "Your objective: Infer logical dependencies between tasks based on technical deliverables, architecture requirements, roles, timelines, and deliverables.",
+      "",
+      "CRITICAL ARCHITECTURAL RULES:",
+      "1. DEPENDENCY DIRECTION MUST ALWAYS BE: prerequisite_task_id -> dependent_task_id.",
+      "   - The PREREQUISITE must finish before the DEPENDENT task can meaningfully start or integrate.",
+      "   - Example 1: Database Schema / Migrations -> Backend API Endpoints -> Frontend UI Integration -> End-to-End Testing / QA.",
+      "   - Example 2: API Contract Design -> Frontend Mocking / Backend Implementation.",
+      "   - Example 3: Authentication Service -> User Profile / Role-based Dashboard.",
+      "2. DO NOT assume that different assignees automatically imply a dependency. Different team members often work in parallel!",
+      "3. DO NOT connect tasks simply because they are in the same project. Tasks can proceed independently in parallel if their deliverables do not strictly require another task's output.",
+      "4. NO CIRCULAR CHAINS: If Task A is a prerequisite for Task B, Task B CANNOT be a prerequisite for Task A.",
+      "5. NO SELF-DEPENDENCIES: A task cannot depend on itself.",
+      "6. EXPLANATION & EVIDENCE: For every proposed dependency, provide a concise explanation (why prerequisite output is strictly needed) and cite evidence from the task title, description, acceptance criteria, or technical deliverables.",
+      "7. CONFIDENCE: Assign a realistic confidence score between 0.0 and 1.0 (e.g., 0.9 for direct architectural blockers like database schema -> backend API, 0.6-0.7 for partial sequencing or logical prerequisites). If a dependency is highly uncertain, assign lower confidence or omit it.",
+      "8. INDEPENDENT TASKS: Explicitly list task IDs that can proceed completely independently or in parallel.",
+      "9. STRICT JSON: Always output standard valid JSON. Do not HTML-escape quotes or strings (do not use &quot; or &amp;).",
+      "10. MILESTONES & PHASES: When the project defines milestones, treat earlier milestone deliverables as foundational prerequisites for subsequent milestone deliverables. Tasks delivering milestone M1 must precede tasks delivering milestone M2.",
+    ].join("\n");
+
+    const projectContext = {
+      projectId: state.project?.id || "",
+      projectName: state.project?.name || "",
+      projectDescription: state.project?.description || "",
+      targetDate: state.project?.targetDate || state.project?.target_date || "",
+      milestones: state.project?.milestones || [],
+    };
+
+    const taskContext = state.tasks.map((t) => ({
+      taskId: String(t.id),
+      title: t.title,
+      description: t.description || "",
+      acceptanceCriteria: t.acceptance_criteria || t.acceptanceCriteria || [],
+      assignedMember: t.assigneeName || t.owner_name || "Unassigned",
+      assignedRole: t.assigneeRole || t.role || "",
+      status: t.status,
+      priority: t.priority || "Medium",
+      deadline: t.deadline || t.due_date || "",
+      existingDependencies: t.dependencies || t.dependsOn || [],
+    }));
+
+    try {
+      const analysis = await model.invoke([
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: JSON.stringify({
+            project: projectContext,
+            tasks: taskContext,
+          }),
+        },
+      ]);
+      return { analysis };
+    } catch (err) {
+      console.warn("Gemini dependency analysis invocation failed, falling back to heuristic:", err.message);
+      return { analysis: inferDependenciesHeuristic(state.project, state.tasks) };
+    }
+  };
+
+  const validate = (state) => ({
+    analysis: normalizeDependencies(
+      DependencyAnalysisResultSchema.parse(state.analysis),
+      state.tasks,
+    ),
+  });
+
+  return new StateGraph(DependencyState)
+    .addNode("infer", infer)
+    .addNode("validate", validate)
+    .addEdge(START, "infer")
+    .addEdge("infer", "validate")
+    .addEdge("validate", END)
+    .compile();
+}
+
+let dependencyGraph;
+
+export async function inferDependenciesWithAI(project, tasks = [], { model } = {}) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return { dependencies: [], independentTaskIds: [], summary: "No tasks provided for dependency analysis." };
+  }
+  const graph = model ? buildDependencyGraph({ model }) : (dependencyGraph ??= buildDependencyGraph());
+  const result = await graph.invoke({
+    project: project || {},
+    tasks,
+  });
+  return result.analysis;
+}

@@ -64,3 +64,34 @@ test("database operations report missing Supabase configuration", async () => {
   assert.equal(response.status, 503);
   assert.match((await response.json()).error, /SUPABASE_URL/);
 });
+
+test("notifications endpoints reject requests without coordinator key", async () => {
+  const getRes = await fetch(`${baseUrl}/api/notifications`);
+  assert.equal(getRes.status, 401);
+
+  const patchRes = await fetch(`${baseUrl}/api/notifications/test-id/read`, { method: "PATCH" });
+  assert.equal(patchRes.status, 401);
+});
+
+test("dependency analysis endpoints reject requests without coordinator key", async () => {
+  const postAnalyze = await fetch(`${baseUrl}/api/projects/1/analyze-dependencies`, { method: "POST" });
+  assert.equal(postAnalyze.status, 401);
+
+  const getDeps = await fetch(`${baseUrl}/api/projects/1/dependencies`);
+  assert.equal(getDeps.status, 401);
+
+  const postConfirm = await fetch(`${baseUrl}/api/projects/1/dependencies/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prerequisiteTaskId: "1", dependentTaskId: "2" }),
+  });
+  assert.equal(postConfirm.status, 401);
+
+  const postReject = await fetch(`${baseUrl}/api/projects/1/dependencies/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prerequisiteTaskId: "1", dependentTaskId: "2" }),
+  });
+  assert.equal(postReject.status, 401);
+});
+

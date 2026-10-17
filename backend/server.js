@@ -35,6 +35,13 @@ import {
   updateProject,
   organizeProjectMeet,
   updateTask,
+  listNotifications,
+  markNotificationRead,
+  analyzeAndInferProjectDependencies,
+  listProjectDependencies,
+  confirmProjectDependency,
+  rejectProjectDependency,
+  deleteProjectDependency,
 } from "./services/taskService.js";
 import {
   getTelegramBotUsername,
@@ -226,6 +233,44 @@ app.patch("/api/projects/:id", async (req, res) => {
   res.json({ project });
 });
 
+const dependencyActionInput = z.object({
+  prerequisiteTaskId: z.string().trim().min(1).max(80),
+  dependentTaskId: z.string().trim().min(1).max(80),
+});
+
+app.post("/api/projects/:id/analyze-dependencies", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const result = await analyzeAndInferProjectDependencies(id);
+  res.json(result);
+});
+
+app.get("/api/projects/:id/dependencies", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const dependencies = await listProjectDependencies(id);
+  res.json({ dependencies });
+});
+
+app.post("/api/projects/:id/dependencies/confirm", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const input = validate(dependencyActionInput, req.body);
+  const dependency = await confirmProjectDependency(id, input);
+  res.json({ dependency });
+});
+
+app.post("/api/projects/:id/dependencies/reject", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const input = validate(dependencyActionInput, req.body);
+  const dependency = await rejectProjectDependency(id, input);
+  res.json({ dependency });
+});
+
+app.delete("/api/projects/:id/dependencies", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const input = validate(dependencyActionInput, req.body || req.query);
+  const result = await deleteProjectDependency(id, input);
+  res.json(result);
+});
+
 app.get("/api/tasks", async (req, res) => {
   const projectId = req.query.project_id
     ? validate(z.string().min(1).max(80), req.query.project_id)
@@ -298,6 +343,24 @@ app.patch("/api/participants/:id", async (req, res) => {
 
 app.get("/api/messages", async (_req, res) => {
   res.json({ messages: await listAllMessages() });
+});
+
+app.get("/api/notifications", async (req, res) => {
+  const recipientId = (req.query.recipient_id || req.get("x-recipient-id"))
+    ? validate(z.string().min(1).max(80), req.query.recipient_id || req.get("x-recipient-id"))
+    : undefined;
+  const unreadOnly = req.query.unread === "true";
+  const notifications = await listNotifications(recipientId, { unreadOnly });
+  res.json({ notifications });
+});
+
+app.patch("/api/notifications/:id/read", async (req, res) => {
+  const id = validate(z.string().min(1).max(80), req.params.id);
+  const recipientId = (req.body?.recipient_id || req.get("x-recipient-id"))
+    ? validate(z.string().min(1).max(80), req.body?.recipient_id || req.get("x-recipient-id"))
+    : undefined;
+  const notification = await markNotificationRead(id, recipientId);
+  res.json({ notification });
 });
 
 app.post("/api/tasks/:id/request-update", async (req, res) => {

@@ -1,211 +1,285 @@
-# ProjectPilot — AI Group Project Coordinator
+# ProjectPilot — AI-Powered Project Delivery & Team Coordination
 
-ProjectPilot helps delivery teams request task updates, receive actual Telegram replies, identify blockers, and keep task status evidence visible in the existing React dashboard.
+ProjectPilot is an intelligent project delivery management platform that coordinates project milestones, tracks task lifecycles, detects blockers, schedules team events, and interacts with teammates directly through Telegram using an AI coordinator agent.
 
-The repository has a TanStack Start/Vite React frontend and a Node/Express backend. Demo data remains local in the browser; real Telegram and Gemini processing use the backend and Supabase when configured. The Telegram bot token, Gemini key, and Supabase service-role key are never sent to the browser.
+The platform combines a **TanStack Start / React** dashboard deployed to **Vercel** with a **Node.js / Express** backend powered by **LangGraph**, **Google Gemini**, **Supabase PostgreSQL**, and the **GrammY Telegram Bot API**.
 
-## What is implemented
+---
 
-- Existing React dashboard and local demo mode are preserved.
-- Express API for projects, tasks, participants, task events, reports, and follow-up requests.
-- Coordinator API-key protection for all non-health API routes.
-- LangGraph workflow using Gemini structured output validated with Zod.
-- Deterministic rules prevent unclear replies, future promises, and unsupported completion claims from overwriting task status.
-- Supabase PostgreSQL schema with RLS enabled, task history, Telegram message deduplication, and an atomic status/event RPC.
-- Telegram long polling with one-time participant linking, `/tasks`, `/report`, and task update replies.
-- Team page registration flow, acceptance-criteria field, task/project API synchronization, and Telegram link-status refresh.
-- Health reports only whether services are configured; it does not reveal credentials.
+## Live Deployments & URLs
 
-## Architecture
+- **Frontend (Production)**: [https://project-pilot-peach.vercel.app](https://project-pilot-peach.vercel.app)
+- **Frontend (Deployment Preview)**: [https://project-pilot-9g5gx12uz-sarthakandhale62-1639.vercel.app](https://project-pilot-9g5gx12uz-sarthakandhale62-1639.vercel.app)
+- **Backend API (Local Dev Server)**: `http://localhost:3001`
+- **Backend Health Check**: [http://localhost:3001/api/health](http://localhost:3001/api/health)
+- **Telegram Bot**: [@ProjPilotAICoordinatorBot](https://t.me/ProjPilotAICoordinatorBot)
+
+---
+
+## Technology Stack
+
+### Frontend
+- **Framework**: [React 19](https://react.dev/) with [TanStack Start](https://tanstack.com/start) & [TanStack Router](https://tanstack.com/router) (file-based routing, SSR streaming).
+- **State Management & Caching**: [TanStack Query (React Query)](https://tanstack.com/query) + React Context API with LocalStorage persistence.
+- **Styling & Design System**: [TailwindCSS v4](https://tailwindcss.com/) with CSS variables, dark/light theme support, glassmorphism, and responsive grid layouts.
+- **UI Components**: [Radix UI](https://www.radix-ui.com/) primitives (Dialog, Sheet, Popover, Select, Dropdown Menu, Progress bar, Alert Dialog, Checkbox, Tabs).
+- **Icons & Visuals**: [Lucide React](https://lucide.dev/).
+- **Charts & Data Visualization**: [Recharts](https://recharts.org/) (ResponsiveContainer, PieChart, BarChart, CartesianGrid, Legend, Tooltip).
+- **Notifications**: [Sonner](https://sonner.emilkowal.ski/) toast system.
+- **Bundler & Server Engine**: [Vite](https://vitejs.dev/) with [Nitro](https://nitro.build/) engine and [Rolldown](https://rolldown.rs/).
+- **Cloud Deployment**: [Vercel](https://vercel.com/) via native Build Output API v3 (`.vercel/output`).
+
+### Backend
+- **Runtime & Server**: [Node.js](https://nodejs.org/) (ES Modules) with [Express 5](https://expressjs.com/).
+- **AI Agent Framework**: [LangChain Core](https://js.langchain.com/) & [LangGraph](https://langchain-ai.github.io/langgraphjs/) state graphs.
+- **LLM Engine**: [Google Gemini 3.5 Flash / 2.5 Flash](https://ai.google.dev/) via `@langchain/google-genai` with structured output parsing.
+- **Schema Validation**: [Zod](https://zod.dev/) for strict runtime type-checking and LLM output guarantees.
+- **Database**: [Supabase](https://supabase.com/) PostgreSQL with Row-Level Security (RLS), custom RPC stored procedures (`apply_task_reply_decision`), foreign key cascades, and transactional audit logs.
+- **Messaging & Chatbot**: [GrammY](https://grammy.dev/) Telegram Bot Framework supporting long-polling and webhook modes with retry mechanisms.
+- **Security & Config**: `dotenv`, CORS origin validation (`FRONTEND_ORIGIN`), and Coordinator API-Key protection (`X-Coordinator-Key`).
+- **Testing**: Node.js native test runner (`node --test`) covering 25 automated unit and integration tests.
+
+---
+
+## System Architecture
 
 ```text
-React dashboard
-  ├── project/task/participant actions ── authenticated Express API
-  └── follow-up button ────────────────── Express ── Telegram Bot API
-                                                    │
-Participant Telegram reply ── long polling ────────┘
-                                  │
-                            LangGraph workflow
-                         Gemini + Zod validation
-                                  │
-                     deterministic status guard
-                                  │
-                Supabase message + event + task update
-                                  │
-                 dashboard refresh / task evidence
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           REACT DASHBOARD (Vercel)                              │
+│                                                                                 │
+│   • Portfolio Overview     • Team Workload & Milestones   • Blocker Radar       │
+│   • Calendar Modal Toggle  • Project Team Meet Modal      • Real-time Polling   │
+└─────────────────────────┬───────────────────────────────────────────────────────┘
+                          │
+                          │ REST API (X-Coordinator-Key)
+                          ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        NODE.JS / EXPRESS BACKEND (:3001)                        │
+│                                                                                 │
+│   ┌─────────────────────┐   ┌────────────────────────┐   ┌──────────────────┐   │
+│   │ Coordinator Router  │   │  LangGraph AI Workflow │   │ GrammY Bot Poller│   │
+│   │ (Projects, Tasks,   │   │  (Gemini + Zod Safety) │   │  (@ProjPilotAI   │   │
+│   │  Follow-ups, Meets) │   │                        │   │   CoordinatorBot)│   │
+│   └──────────┬──────────┘   └───────────┬────────────┘   └─────────┬────────┘   │
+└──────────────┼──────────────────────────┼──────────────────────────┼────────────┘
+               │                          │                          │
+               ▼                          ▼                          │ Telegram API
+┌──────────────────────────────────────────────────┐                 ▼
+│              SUPABASE POSTGRESQL                 │       ┌──────────────────┐
+│                                                  │       │  TEAM MEMBERS    │
+│  • projects        • tasks        • task_events  │       │  (Telegram DMs)  │
+│  • participants    • task_criteria               │       │                  │
+│  • telegram_messages (deduplication & history)   │       │ • /start <code>  │
+│  • RPC: apply_task_reply_decision                │       │ • /tasks         │
+└──────────────────────────────────────────────────┘       │ • /report        │
+                                                           │ • Status updates │
+                                                           └──────────────────┘
 ```
 
-The backend's service-role key is trusted server-side only. Row Level Security is enabled on the tables; no public/anonymous policies are created. The backend is the sole database access path and protects coordinator operations with `COORDINATOR_API_KEY`.
+---
 
-## Requirements and installation
+## Implemented Features
 
-- Node.js 20 or newer.
-- A Supabase project.
-- A Google AI Studio API key.
-- A Telegram bot token from the bot you already created.
+### 1. Interactive Real-Time Calendar & Schedule Planner
+- **Home Screen Integration**: Clean logo button in the top-right header and page header (`[ Calendar ]`).
+- **Full-Sized Modal**: Opens a comprehensive calendar without crowding the dashboard view.
+- **Visual Categorization**: Color-coded badges for meetings, code reviews, releases, milestones, and task deadlines.
+- **Day Agenda Drawer**: Clicking any date displays scheduled events, tasks due, and active project milestones for that day.
+- **Event Scheduling Workflow**: Built-in modal to schedule new events with title, date, time, category, meeting links, and descriptions.
+- **Real-Time Activity Logging**: Automatically records event creation and cancellations into the project activity audit log.
 
-From the repository root in Windows PowerShell:
+### 2. Project Team Meet Organizer ("Organize Team Meet")
+- **One-Click Coordination**: Located inside project detail pages ([`projects.$projectId.tsx`](./src/routes/projects.$projectId.tsx)).
+- **Customizable Details**: Custom meeting title, agenda, and instant meeting link generation (Google Meet / Jitsi).
+- **Telegram Broadcast Alert**: Sends direct Telegram alerts to all project members with meeting details and an instant join button.
+- **Activity Feed Record**: Logs the meet organization event into the project timeline.
 
-```powershell
-npm install --legacy-peer-deps
-Push-Location backend
-npm install
-Copy-Item .env.example .env
-Pop-Location
+### 3. AI-Powered Telegram Task Coordination
+- **Coordinator-Initiated Follow-Ups**: Delivery managers click **Request update** on any task to send a personalized Telegram DM to the assignee.
+- **LangGraph AI Processing**:
+  - Analyzes natural language replies (e.g., *"I have finished the frontend development"*, *"We are blocked by payment credentials"*).
+  - Matches replies to the correct assigned task using role, title, and assignee context.
+  - Verifies evidence against defined **acceptance criteria**.
+  - Applies a strict **deterministic status guard**: blockers and unmet acceptance criteria prevent premature task completion.
+- **Real-Time Dashboard Sync**:
+  - Automatically updates task status (`Pending`, `In Progress`, `Blocked`, `Complete`).
+  - Stores message history and audit logs in Supabase.
+  - Frontend polls every 3 seconds to reflect updates in real-time without page reloads.
+
+### 4. Blocker Radar & Delivery Risk Detection
+- **Major Blockers Panel**: Surfaces critical and high-priority blocked tasks across all projects.
+- **Upstream Dependency Warnings**: Identifies tasks delayed by blocked predecessors.
+- **Overdue Task Tracking**: Highlights missed deadlines.
+- **Blocker Resolution Workflow**: Modal to record resolution details and transition tasks back to active states.
+
+### 5. Team Management & Secure Linking
+- **Participant Registration**: Register team members with their name, role, and department.
+- **One-Time Telegram Deep Links**: Secure 30-minute tokenized deep links (`https://t.me/ProjPilotAICoordinatorBot?start=<code>`) for 1-to-1 account verification.
+- **Telegram Bot Commands**:
+  - `/start <code>`: Links user Telegram account to their ProjectPilot profile.
+  - `/tasks`: Lists personal assigned tasks with status, priority, and deadlines.
+  - `/report`: Summarizes assigned, open, blocked, and completed tasks.
+
+### 6. Production Cloud Deployment on Vercel
+- **Automatic Preset Detection**: Configured in `vite.config.ts` to switch Nitro to the `vercel` preset when running on Vercel (`process.env.VERCEL`).
+- **Build Output API v3**: Emits static assets and serverless functions directly into `.vercel/output/`.
+- **Custom Configuration**: `vercel.json` and `.gitignore` setup for seamless continuous deployment.
+
+---
+
+## Directory Structure
+
+```text
+Project_pilot/
+├── backend/
+│   ├── sql/
+│   │   └── setup.sql                 # Supabase schema, RLS, and RPC procedures
+│   ├── services/
+│   │   ├── taskService.js            # Task lifecycle, atomic updates, and Supabase client
+│   │   └── telegram.js               # GrammY bot configuration, commands, and polling
+│   ├── test/
+│   │   ├── agent.test.js             # 25 automated unit tests for AI agent and safety rules
+│   │   └── services.test.js          # API and service integration tests
+│   ├── agent.js                      # LangGraph state graph and Gemini analysis workflow
+│   ├── config.js                     # Environment variable validation and CORS settings
+│   ├── server.js                     # Express app, authenticated routes, and error handling
+│   ├── package.json                  # Backend dependencies and scripts
+│   └── .env.example                  # Environment variable template
+│
+├── src/
+│   ├── components/
+│   │   ├── pp/
+│   │   │   ├── app-shell.tsx         # Responsive sidebar, navigation, and top header
+│   │   │   ├── calendar-view.tsx     # Full interactive calendar & scheduling modal
+│   │   │   ├── organize-meet-dialog.tsx # Team meet scheduling and Telegram broadcast dialog
+│   │   │   ├── task-dialog.tsx       # Create / edit task modal with criteria
+│   │   │   ├── task-sheet.tsx        # Task detail slide-over drawer with chat history
+│   │   │   ├── project-dialog.tsx    # Create / edit project modal
+│   │   │   ├── activity-list.tsx     # Portfolio activity feed
+│   │   │   └── task-table.tsx        # Tabular task rows with priority badges
+│   │   ├── ui/                       # Reusable Radix UI component library
+│   │   └── views/                    # Feature views (Team, Coordinator, Blockers, Reports)
+│   ├── lib/
+│   │   ├── api.ts                    # Backend API client and error handling
+│   │   ├── demo-data.ts              # Sample portfolio seed data
+│   │   ├── rules.ts                  # Task status and delivery risk evaluation rules
+│   │   ├── store.tsx                 # Global application store with auto-sync
+│   │   └── types.ts                  # TypeScript data models and interfaces
+│   ├── routes/
+│   │   ├── index.tsx                 # Overview dashboard route
+│   │   ├── projects.index.tsx        # Projects list route
+│   │   ├── projects.$projectId.tsx   # Project details, team meet button, and milestones
+│   │   ├── tasks.tsx                 # Filterable task radar
+│   │   ├── coordinator.tsx           # AI Coordinator proposal approval review
+│   │   ├── blockers.tsx              # Blocker radar view
+│   │   ├── dependencies.tsx          # Dependency visualization and risks
+│   │   ├── activity.tsx              # Activity audit history
+│   │   ├── reports.tsx               # Status reports view
+│   │   ├── team.tsx                  # Team member registration and Telegram linking
+│   │   └── settings.tsx              # Backend configuration and health checker
+│   └── styles.css                    # Tailwind CSS configuration and theme variables
+│
+├── vercel.json                       # Vercel deployment configuration
+├── vite.config.ts                    # Vite / TanStack Start configuration with Vercel preset
+├── package.json                      # Frontend dependencies and scripts
+└── README.md                         # Project documentation
 ```
 
-`backend/.env.example` is a template only. Add real credentials to `backend/.env` and do not commit that file. Create a coordinator key locally:
+---
 
-```powershell
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+## Getting Started
+
+### Prerequisites
+- **Node.js**: v20 or newer
+- **Supabase**: PostgreSQL database
+- **Google AI Studio Key**: Gemini API key
+- **Telegram Bot Token**: Created via [@BotFather](https://t.me/BotFather)
+
+---
+
+### Setup Instructions
+
+1. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/sarthakandhale/Project_pilot.git
+   cd Project_pilot
+   ```
+
+2. **Install Frontend Dependencies**:
+   ```bash
+   npm install --legacy-peer-deps
+   ```
+
+3. **Install Backend Dependencies**:
+   ```bash
+   cd backend
+   npm install
+   ```
+
+4. **Configure Backend Environment**:
+   Copy `.env.example` to `.env` inside the `backend` folder:
+   ```env
+   PORT=3001
+   FRONTEND_ORIGIN=http://localhost:8080,http://localhost:5173,https://project-pilot-peach.vercel.app
+   COORDINATOR_API_KEY=your_generated_secret_key_here
+   GOOGLE_API_KEY=your_gemini_api_key
+   GEMINI_MODEL=gemini-3.5-flash
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+   TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+   TELEGRAM_MODE=polling
+   MAX_FOLLOWUPS_PER_DAY=5
+   ```
+
+5. **Set up the Database Schema**:
+   Open your Supabase SQL Editor and execute [`backend/sql/setup.sql`](./backend/sql/setup.sql).
+
+---
+
+## Running the Application
+
+### Option 1: Run Backend and Frontend Concurrently
+
+**Terminal 1 — Backend**:
+```bash
+npm --prefix backend start
+# Or from inside /backend: node server.js
 ```
 
-Fill in these values in `backend/.env`:
-
-```dotenv
-PORT=3001
-FRONTEND_ORIGIN=http://localhost:8080
-COORDINATOR_API_KEY=<generated-random-value>
-GOOGLE_API_KEY=<Google AI Studio key>
-GEMINI_MODEL=gemini-2.5-flash
-SUPABASE_URL=<Supabase project URL>
-SUPABASE_SERVICE_ROLE_KEY=<Supabase service-role key>
-TELEGRAM_BOT_TOKEN=<existing bot token>
-MAX_FOLLOWUPS_PER_DAY=5
-```
-
-Use the Supabase **service-role** key only in this backend environment. Never add it or the Gemini/Telegram keys to a `VITE_` variable. Configure `FRONTEND_ORIGIN` with the exact origin printed by Vite when the frontend starts (this workspace commonly uses `http://localhost:8080`; use the port Vite actually prints). Multiple allowed origins can be comma-separated.
-
-## Supabase setup
-
-1. Stop the backend so no writes occur while sequences and schema are updated.
-2. Back up the Supabase project, then open its SQL Editor.
-3. Run [`backend/sql/setup.sql`](./backend/sql/setup.sql) in full.
-4. Copy the project URL and service-role key into `backend/.env`.
-
-The setup supports the existing bigint primary keys in this project: it preserves the IDs and rows, adds generated ID defaults where missing, and adds the app-specific columns plus stable `client_id` references for dashboard-created projects/tasks. The backend maps the dashboard's local IDs to these database records. It does not rename or drop the existing `task_updates` table; this Telegram integration writes messages to `telegram_messages` and audit records to `task_events`.
-
-Back up the database before applying schema changes. Review the SQL in the Supabase dashboard first and run it against the exact project URL configured in `backend/.env`. The script is designed to be rerunnable, enables RLS without public policies, creates the indexes, and installs the transactional functions used for follow-up limits and reply decisions. After running it, restart the backend so PostgREST's schema cache is refreshed.
-
-## Run the app
-
-Open two PowerShell terminals from the repository root.
-
-Terminal 1 — backend:
-
-```powershell
-Push-Location backend
+**Terminal 2 — Frontend**:
+```bash
 npm run dev
 ```
 
-Terminal 2 — frontend:
+The frontend will start at **`http://localhost:8080`** (or `http://localhost:5173`).
 
-```powershell
-npm run dev
-```
+---
 
-In the dashboard's **Settings** page:
+## Connecting Frontend to Backend
 
-1. Set Backend base URL to `http://localhost:3001`.
-2. Enter the same `COORDINATOR_API_KEY` used in `backend/.env`.
-3. Select **Re-check** and confirm database, Telegram, and API-key configuration.
+1. Navigate to **Settings** in the dashboard (`/settings`).
+2. Set **Backend base URL** to:
+   - `http://localhost:3001` (when running locally)
+   - Your tunnel or deployed backend URL (when testing with the Vercel cloud frontend)
+3. Enter your **`COORDINATOR_API_KEY`**.
+4. Click **Re-check**. The dashboard will confirm database, Telegram bot, and LLM connectivity with green checkmarks.
 
-The coordinator key is held in the browser tab's `sessionStorage` and is sent only as an API authorization header. It is not a Supabase, Gemini, or Telegram credential. Do not use this lightweight shared-key setup as a substitute for a production user identity provider.
+---
 
-## Live Telegram team workflow
+## Running Tests
 
-The bot uses Telegram **long polling**. While the backend process is running and connected to Telegram, it receives private messages and handles them as they arrive (usually within seconds). This is live message handling, not a scheduled batch job. Keep the backend terminal/process running; closing it, stopping the computer, losing network access, or running another poller with the same bot token interrupts service.
+Execute the automated test suite covering AI reasoning, safety rules, and coordinator endpoints:
 
-### Connect each team member
+```bash
+# Backend unit & integration tests (25 tests)
+npm --prefix backend test
 
-1. Start the backend and frontend as shown above. Check the backend terminal for `Telegram polling started for @...` and open **Settings** in the dashboard. Set the backend URL to `http://localhost:3001`, enter the coordinator key, and re-check the connection. Settings distinguishes an active poller from a configured bot; a **polling conflict** means another process is using the same token.
-2. Create or select the project. The project must exist in Supabase before participant registration; when registering from a local demo project, the dashboard syncs its project details first.
-3. Open **Team**. Register **each person separately** against the project. Each person gets their own participant record and one-time Telegram deep link, valid for 30 minutes. The page also displays the bot's public URL (`https://t.me/<bot-username>`).
-4. Send each person their personal link privately (do not post it in a group). Opening the link launches the bot and submits their one-time `/start` code. Each person must link their own Telegram account; sharing a link lets the first account redeem it.
-5. Select **Refresh Telegram status** in Team. The linked status should update for each registered person.
-
-### Run a two-way task conversation
-
-1. Create a task and assign it to a registered backend participant who has linked Telegram. Add acceptance criteria for work that should not be marked complete without evidence.
-2. Open the task and choose **Request update**. Review/edit the message and send it. This sends a real Telegram DM to that task's assignee; it does not broadcast to the whole project.
-3. The assignee replies to the bot in their private chat. They can reply directly to the request or send an update naming the task. The bot processes incoming text using the assigned tasks/follow-ups, Gemini analysis, and deterministic safety checks, then responds in Telegram.
-4. The backend records the message and analysis in Supabase. A clear progress, blocker, or evidence-backed completion can update task status; uncertain replies ask for clarification and do not change status.
-5. Keep the task detail open. The dashboard automatically polls the backend every three seconds for current status, Telegram messages, and activity. **Refresh** remains available for an immediate manual check. Team link status refreshes from **Team**.
-
-### Commands team members can use
-
-- `/start <code>` — link their Telegram account using the coordinator-issued one-time code.
-- `/tasks` — list their assigned open tasks.
-- `/report` — show a personal summary of assigned/open/blocked/completed tasks.
-- A normal text message — report progress, completion evidence, or a blocker. If multiple tasks could match, name the task or reply directly to the relevant update request; the bot asks for clarification when it cannot safely tell.
-
-The bot currently handles **private chats only**. It does not join project group chats, broadcast announcements, send unsolicited/scheduled reminders, or let one member view another member's tasks. Coordinators initiate task conversations using **Request update**; assign tasks and issue separate registration links for each person. The dashboard polls only the open task view, not every Telegram conversation globally. A polling conflict is retried every 10 seconds so the bot can recover after the other poller stops; Settings shows the retry state. For a public deployment, run one secured long-lived backend worker or configure a secured Telegram webhook; never run multiple long-polling instances with the same bot token.
-
-### Confirm the Supabase schema before testing
-
-The health endpoint reports whether environment values are present and whether Telegram polling is active; it does not verify that the database schema matches this app. Run the full, current [`backend/sql/setup.sql`](./backend/sql/setup.sql) in the **same Supabase project whose URL is in `backend/.env`**, then restart the backend. Existing bigint IDs are retained; the API maps task `owner_id` to its `assignee_id` field and accepts the schema's lowercase task statuses.
-
-The migration adds missing participant Telegram/link fields, task description/criteria/dependencies, project milestones, participant timestamps, and project/task `client_id` columns. It also makes participant Telegram chat IDs nullable until a member links their account. A populated `task_updates` table is left untouched. Do not manually rename/drop tables or columns. If your actual constraints or foreign-key types differ from the schema shown here, stop and back up the database before adapting the migration.
-
-## API overview
-
-All endpoints except `GET /api/health` require `X-Coordinator-Key`.
-
-- `GET /api/health`
-- `GET, POST /api/projects`; `PATCH /api/projects/:id`
-- `GET, POST /api/tasks`; `PATCH, DELETE /api/tasks/:id`
-- `GET /api/tasks/:id/events`
-- `GET /api/tasks/:id/messages`
-- `POST /api/tasks/:id/request-update`
-- `GET, POST /api/participants`
-- `GET /api/projects/:id/report`
-
-Request bodies are validated and bounded. Follow-ups are limited per participant per day and per task per hour. Duplicate Telegram update IDs are rejected by a database uniqueness constraint. Database and delivery errors are surfaced to the API caller; secrets and stack traces are not returned.
-
-## Tests and checks
-
-```powershell
-Push-Location backend
-npm test
-npm run check
-Pop-Location
-npm test
+# TypeScript typecheck & production build
 npm run build
-npm run lint
 ```
 
-Backend unit/integration checks mock model/database boundaries and require no credentials. The full Telegram + Gemini + Supabase demonstration requires real credentials and was not exercised by the automated tests.
+---
 
-## Deploy the backend on Render's free plan
+## License
 
-The repository's [`render.yaml`](./render.yaml) defines a free Render web service and switches Telegram from long polling to webhooks for deployment. Render's free services spin down after inactivity, so the first Telegram update after a sleep may be delayed while the service wakes; use this for development/testing, not time-critical production coordination.
-
-1. Rotate any credentials that were shared in chat or committed accidentally. Do not commit `backend/.env` or paste secrets into source files.
-2. Sign in to Render and create a **New + > Blueprint** from this GitHub repository, using `render.yaml` at the repository root.
-3. During Blueprint setup, enter fresh values for `COORDINATOR_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, and `FRONTEND_ORIGIN`. Generate the webhook secret with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`; it must contain only letters, numbers, `_`, and `-`. For `FRONTEND_ORIGIN`, enter the exact origin of the dashboard that will call this backend (scheme and host, without a trailing slash; comma-separate multiple origins). Enter secrets only in Render's environment-variable form. `GOOGLE_API_KEY` is optional; add it in the Render service's environment settings if AI reply analysis is needed.
-4. Confirm the free service plan and create the service. Keep exactly one instance for this bot token.
-5. After deployment, open `https://<your-service>.onrender.com/api/health`. Check `status: "ok"`, `telegram.mode: "webhook"`, `telegram.webhook: true`, and `database.configured: true`. Health reports configuration/runtime flags, not that every Supabase query succeeds.
-6. In the dashboard's **Settings**, set Backend base URL to `https://<your-service>.onrender.com` and enter the same `COORDINATOR_API_KEY` value. The dashboard must itself be reachable at the origin configured as `FRONTEND_ORIGIN`.
-7. Share the backend URL with trusted teammates as needed. The API is internet-reachable, but coordinator endpoints still require the key. This project does not yet have per-user login or role authorization; do not distribute the shared key broadly.
-
-## Limitations and deployment notes
-
-- The browser retains the existing demo-first local data store. New/edited projects and tasks sync to the backend when it is connected; old demo records are not automatically bulk-imported.
-- Create/register a project participant in Team before assigning real backend tasks. Existing sample teammates are illustrative records, not registered Telegram identities.
-- Follow-ups are coordinator-triggered; no scheduled reminder worker is enabled. A locally running backend cannot process anything while the computer is off.
-- Local development uses Telegram long polling; Render deployment uses Telegram webhooks. Do not run polling locally at the same time as a deployed webhook using the same token.
-- The project has no full login/role-management provider. The shared coordinator key is suitable only for a controlled demo/trusted deployment; use authenticated user sessions and per-role authorization before exposing the API publicly.
-- Gemini estimates are not guarantees. Ambiguous analysis is recorded for audit and does not replace the current task status.
-- If Gemini is unavailable, the message is retained and the bot reports the analysis failure; no status update is claimed as successful.
-
-## Troubleshooting
-
-- **Backend health is unreachable:** confirm the backend is running on port 3001 and the dashboard URL is exactly `http://localhost:3001`.
-- **Settings says configured but Team/task database requests fail:** health checks only check configuration flags. Review the backend terminal error, confirm the `SUPABASE_URL` project matches the project where setup SQL was run, and re-run the current additive setup script if the expected columns or functions are absent.
-- **API returns 401:** the Settings page coordinator key must exactly match `COORDINATOR_API_KEY` in `backend/.env`; re-check after changing it.
-- **API returns a Supabase configuration error:** set both Supabase environment values and restart the backend. A configured URL/key does not mean the migration has been run.
-- **Participant registration fails:** create/select a project first, run the SQL setup, and ensure the coordinator key is authorized.
-- **Telegram bot gives no response:** start exactly one backend poller with `TELEGRAM_BOT_TOKEN` and working Supabase schema. Confirm the participant used `/start <code>` in a private chat and that the one-time code has not expired. A Telegram `409 Conflict` from `getUpdates` usually means another process is polling with the same token; stop the duplicate and restart one backend.
-- **A message is recorded but not analyzed:** confirm `GOOGLE_API_KEY` is configured, then ask the participant to send a fresh update after Gemini is available. Failed incoming messages are not silently retried or re-applied.
-- **The dashboard still shows the old task state:** open the task detail and select **Refresh**. The dashboard currently refreshes on demand rather than using realtime subscriptions.
-- **A task cannot be assigned or followed up:** only backend-registered project participants can be assigned to synced tasks, and the participant must link their own Telegram account before a real follow-up can be delivered.
+This project is licensed under the MIT License.

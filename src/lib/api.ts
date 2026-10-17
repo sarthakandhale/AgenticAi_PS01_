@@ -89,6 +89,24 @@ export interface BackendEvent {
   analysis: { classification?: string; explanation?: string } | null;
   created_at: string;
 }
+export interface BackendTaskDependency {
+  id: string;
+  projectId: string;
+  prerequisiteTaskId: string;
+  prerequisiteTitle: string;
+  prerequisiteStatus?: string;
+  prerequisiteDeadline?: string;
+  dependentTaskId: string;
+  dependentTitle: string;
+  dependentStatus?: string;
+  dependentDeadline?: string;
+  confidence: number;
+  explanation: string;
+  evidence?: string;
+  status: "PROPOSED" | "CONFIRMED" | "REJECTED";
+  createdAt: string;
+  updatedAt: string;
+}
 
 export const api = {
   health: (base: string) => call<HealthResponse>(base, "/api/health"),
@@ -180,4 +198,62 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }, key),
+  listNotifications: (base: string, recipientId?: string, key = "") =>
+    call<{
+      notifications: Array<{
+        id: string;
+        recipient_id: string;
+        project_id?: string;
+        title: string;
+        message: string;
+        read: boolean;
+        created_at: string;
+      }>;
+    }>(base, recipientId ? `/api/notifications?recipient_id=${encodeURIComponent(recipientId)}` : "/api/notifications", undefined, key),
+  markNotificationRead: (base: string, id: string, recipientId?: string, key = "") =>
+    call<{
+      notification: {
+        id: string;
+        read: boolean;
+      };
+    }>(base, `/api/notifications/${encodeURIComponent(id)}/read`, {
+      method: "PATCH",
+      body: JSON.stringify(recipientId ? { recipient_id: recipientId } : {}),
+    }, key),
+  analyzeDependencies: (base: string, projectId: string, key = "") =>
+    call<{ dependencies: BackendTaskDependency[]; independentTaskIds: string[]; summary?: string }>(
+      base,
+      `/api/projects/${encodeURIComponent(projectId)}/analyze-dependencies`,
+      { method: "POST" },
+      key,
+    ),
+  listDependencies: (base: string, projectId: string, key = "") =>
+    call<{ dependencies: BackendTaskDependency[] }>(
+      base,
+      `/api/projects/${encodeURIComponent(projectId)}/dependencies`,
+      undefined,
+      key,
+    ),
+  confirmDependency: (base: string, projectId: string, body: { prerequisiteTaskId: string; dependentTaskId: string }, key = "") =>
+    call<{ dependency: BackendTaskDependency }>(
+      base,
+      `/api/projects/${encodeURIComponent(projectId)}/dependencies/confirm`,
+      { method: "POST", body: JSON.stringify(body) },
+      key,
+    ),
+  rejectDependency: (base: string, projectId: string, body: { prerequisiteTaskId: string; dependentTaskId: string }, key = "") =>
+    call<{ dependency: BackendTaskDependency }>(
+      base,
+      `/api/projects/${encodeURIComponent(projectId)}/dependencies/reject`,
+      { method: "POST", body: JSON.stringify(body) },
+      key,
+    ),
+  deleteDependency: (base: string, projectId: string, body: { prerequisiteTaskId: string; dependentTaskId: string }, key = "") =>
+    call<{ success: boolean }>(
+      base,
+      `/api/projects/${encodeURIComponent(projectId)}/dependencies`,
+      { method: "DELETE", body: JSON.stringify(body) },
+      key,
+    ),
 };
+

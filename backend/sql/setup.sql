@@ -144,6 +144,17 @@ create index if not exists followups_participant_status_idx on public.followups(
 create index if not exists followups_task_requested_idx on public.followups(task_id, requested_at desc);
 create index if not exists telegram_messages_participant_created_idx on public.telegram_messages(participant_id, created_at desc);
 
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  recipient_id bigint not null references public.participants(id) on delete cascade,
+  project_id bigint references public.projects(id) on delete cascade,
+  title text not null,
+  message text not null,
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create index if not exists notifications_recipient_idx on public.notifications(recipient_id, read, created_at desc);
+
 do $$
 declare
   v_table text;
@@ -182,6 +193,7 @@ alter table public.tasks enable row level security;
 alter table public.task_events enable row level security;
 alter table public.telegram_messages enable row level security;
 alter table public.followups enable row level security;
+alter table public.notifications enable row level security;
 
 drop function if exists public.create_followup_if_allowed(text, text, text, text, integer);
 create or replace function public.create_followup_if_allowed(
@@ -302,5 +314,31 @@ revoke all on function public.apply_reply_decision(bigint, bigint, bigint, uuid,
 grant execute on function public.apply_reply_decision(bigint, bigint, bigint, uuid, uuid, text, jsonb, text, text) to service_role;
 revoke all on function public.create_followup_if_allowed(bigint, bigint, bigint, text, integer) from public, anon, authenticated;
 grant execute on function public.create_followup_if_allowed(bigint, bigint, bigint, text, integer) to service_role;
+
+create table if not exists public.task_dependencies (
+  id uuid primary key default gen_random_uuid(),
+  project_id bigint not null references public.projects(id) on delete cascade,
+  prerequisite_task_id bigint not null references public.tasks(id) on delete cascade,
+  dependent_task_id bigint not null references public.tasks(id) on delete cascade,
+  confidence numeric(3,2) not null default 0.85 check (confidence >= 0 and confidence <= 1),
+  explanation text not null default '',
+  evidence text default '',
+  status text not null default 'PROPOSED' check (status in ('PROPOSED', 'CONFIRMED', 'REJECTED')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint uq_project_prereq_dependent unique (project_id, prerequisite_task_id, dependent_task_id),
+  constraint chk_no_self_dependency check (prerequisite_task_id <> dependent_task_id)
+);
+
+create index if not exists task_dependencies_project_idx
+  on public.task_dependencies(project_id);
+create index if not exists task_dependencies_prereq_idx
+  on public.task_dependencies(prerequisite_task_id);
+create index if not exists task_dependencies_dependent_idx
+  on public.task_dependencies(dependent_task_id);
+
+alter table public.task_dependencies enable row level security;
+revoke all on public.task_dependencies from public, anon, authenticated;
+grant all on public.task_dependencies to service_role;
 
 notify pgrst, 'reload schema';

@@ -69,12 +69,20 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { data, selectedProjectId, setSelectedProjectId, openTaskDialog, setOpenTaskId, currentUser, calendarOpen, setCalendarOpen } = useStore();
+  const { data, selectedProjectId, setSelectedProjectId, openTaskDialog, setOpenTaskId, currentUser, calendarOpen, setCalendarOpen, markNotificationRead } = useStore();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const currentMember = data.members.find((m) => m.name === currentUser);
+  const currentMemberId = currentMember?.id;
+  const isManager = currentMember?.role.toLowerCase().includes("manager") || currentUser === "Priya Raman";
+
+  const userNotifications = (data.notifications || []).filter(
+    (n) => isManager || n.recipientId === currentMemberId,
+  );
+  const unreadNotifs = userNotifications.filter((n) => !n.read);
   const blocked = data.tasks.filter((t) => t.status === "Blocked");
   const overdue = data.tasks.filter(isOverdue);
   const pendingProposals = data.proposals.filter((p) => p.state === "pending");
-  const notifCount = blocked.length + overdue.length + pendingProposals.length;
+  const notifCount = blocked.length + overdue.length + pendingProposals.length + unreadNotifs.length;
 
   return (
     <div className="flex min-h-screen w-full">
@@ -113,13 +121,66 @@ export function AppShell({ children }: { children: ReactNode }) {
                   {notifCount > 0 && <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] text-destructive-foreground">{notifCount}</span>}
                 </Button>
               </PopoverTrigger>
-              <PopoverContent align="end" className="w-80 p-0">
-                <div className="border-b px-3 py-2 text-sm font-semibold">Attention needed <span className="text-xs font-normal text-muted-foreground">(in-app only)</span></div>
-                <ul className="max-h-80 overflow-y-auto text-sm">
-                  {pendingProposals.length > 0 && <li className="border-b"><Link to="/coordinator" className="block px-3 py-2 hover:bg-muted">{pendingProposals.length} proposed update(s) awaiting review</Link></li>}
-                  {blocked.map((t) => <li key={t.id} className="border-b"><button className="w-full px-3 py-2 text-left hover:bg-muted" onClick={() => setOpenTaskId(t.id)}><span className="text-destructive">Blocked:</span> {t.title}</button></li>)}
-                  {overdue.map((t) => <li key={`o${t.id}`} className="border-b"><button className="w-full px-3 py-2 text-left hover:bg-muted" onClick={() => setOpenTaskId(t.id)}><span className="text-warning-foreground">Overdue:</span> {t.title}</button></li>)}
-                  {notifCount === 0 && <li className="px-3 py-4 text-muted-foreground">All clear.</li>}
+              <PopoverContent align="end" className="w-84 sm:w-96 p-0">
+                <div className="flex items-center justify-between border-b px-3 py-2 text-sm font-semibold">
+                  <span>Notifications & Alerts</span>
+                  {unreadNotifs.length > 0 && (
+                    <span className="text-xs font-normal text-muted-foreground">{unreadNotifs.length} unread</span>
+                  )}
+                </div>
+                <ul className="max-h-84 overflow-y-auto text-sm">
+                  {userNotifications.length > 0 && (
+                    <li className="bg-muted/40 px-3 py-1 text-xs font-medium text-muted-foreground">Project Assignments</li>
+                  )}
+                  {userNotifications.map((n) => (
+                    <li key={n.id} className={cn("border-b px-3 py-2 text-xs transition-colors", !n.read ? "bg-primary/5" : "opacity-80")}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-1.5 font-semibold text-foreground">
+                            <span className={cn("h-1.5 w-1.5 rounded-full", !n.read ? "bg-primary" : "bg-muted-foreground/40")} />
+                            {n.title}
+                          </div>
+                          <p className="mt-1 text-muted-foreground leading-relaxed">{n.message}</p>
+                          <span className="mt-1 block text-[10px] text-muted-foreground/70">
+                            {new Date(n.createdAt).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                          </span>
+                        </div>
+                        {!n.read && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs text-primary hover:bg-primary/10"
+                            onClick={() => void markNotificationRead(n.id)}
+                            title="Mark as read"
+                          >
+                            Mark read
+                          </Button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                  {pendingProposals.length > 0 && (
+                    <li className="border-b">
+                      <Link to="/coordinator" className="block px-3 py-2 text-xs font-medium text-primary hover:bg-muted">
+                        🤖 {pendingProposals.length} proposed update(s) awaiting review in AI Coordinator
+                      </Link>
+                    </li>
+                  )}
+                  {blocked.map((t) => (
+                    <li key={t.id} className="border-b">
+                      <button className="w-full px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setOpenTaskId(t.id)}>
+                        <span className="font-semibold text-destructive">Blocked:</span> {t.title}
+                      </button>
+                    </li>
+                  ))}
+                  {overdue.map((t) => (
+                    <li key={`o${t.id}`} className="border-b">
+                      <button className="w-full px-3 py-2 text-left text-xs hover:bg-muted" onClick={() => setOpenTaskId(t.id)}>
+                        <span className="font-semibold text-warning-foreground">Overdue:</span> {t.title}
+                      </button>
+                    </li>
+                  ))}
+                  {notifCount === 0 && <li className="px-3 py-4 text-center text-xs text-muted-foreground">All clear. No pending notifications.</li>}
                 </ul>
               </PopoverContent>
             </Popover>

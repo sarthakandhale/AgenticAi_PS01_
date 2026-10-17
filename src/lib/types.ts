@@ -157,6 +157,57 @@ export interface ScheduledEvent {
   createdAt: string;
 }
 
+export interface AppNotification {
+  id: string;
+  recipientId: string;
+  projectId?: string;
+  title: string;
+  message: string;
+  read: boolean;
+  createdAt: string;
+}
+
+export type RescueStrategy =
+  | "mock_api_contract"
+  | "partial_deliverable"
+  | "task_resequencing"
+  | "work_reassignment";
+
+export type RescueStatus = "proposed" | "approved" | "completed" | "rejected";
+
+export interface RescueRecommendation {
+  id: string;
+  delayedTaskId: string;
+  strategy: RescueStrategy;
+  title: string;
+  rationale: string;
+  affectedTaskIds: string[];
+  status: RescueStatus;
+  mockContractDetails?: string;
+  reassignedToMemberId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskDependencyEdge {
+  id: string;
+  projectId: string;
+  prerequisiteTaskId: string;
+  prerequisiteTitle?: string;
+  prerequisiteStatus?: TaskStatus;
+  prerequisiteDeadline?: string;
+  dependentTaskId: string;
+  dependentTitle?: string;
+  dependentStatus?: TaskStatus;
+  dependentDeadline?: string;
+  confidence: number;
+  explanation: string;
+  evidence?: string;
+  status: "PROPOSED" | "CONFIRMED" | "REJECTED";
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface AppData {
   members: Member[];
   projects: Project[];
@@ -166,4 +217,8 @@ export interface AppData {
   proposals: Proposal[];
   settings: Settings;
   events?: ScheduledEvent[];
+  notifications?: AppNotification[];
+  rescueActions?: RescueRecommendation[];
+  taskDependencies?: TaskDependencyEdge[];
 }
+

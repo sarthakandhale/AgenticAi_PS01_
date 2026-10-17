@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import { requireDatabase } from "../db/supabase.js";
 import { config } from "../config.js";
+import { inferDependenciesWithAI } from "../agent.js";
 
 const DB_STATUS = {
   Pending: "pending",
@@ -123,7 +124,7 @@ export async function resolveParticipantDbId(value, db = requireDatabase()) {
   return byName?.id ?? null;
 }
 
-export async function syncProjectMembers(projectDbId, memberIds, db = requireDatabase()) {
+export async function syncProjectMembers(projectDbId, memberIds, db = requireDatabase(), sendNotification = null) {
   if (!Array.isArray(memberIds)) return;
   const resolvedIds = [];
   for (const mId of memberIds) {
@@ -141,6 +142,19 @@ export async function syncProjectMembers(projectDbId, memberIds, db = requireDat
 
   const currentIds = new Set((currentMembers || []).map((m) => m.participant_id));
 
+  // Fetch project name for human-readable notifications
+  let projectName = "New Project";
+  try {
+    const { data: proj } = await db
+      .from("projects")
+      .select("name")
+      .eq("id", projectDbId)
+      .maybeSingle();
+    if (proj?.name) projectName = proj.name;
+  } catch {
+    // Project name fallback
+  }
+
   for (const pId of resolvedIds) {
     if (!currentIds.has(pId)) {
       const { error: insertError } = await db.from("project_members").insert({
@@ -149,10 +163,160 @@ export async function syncProjectMembers(projectDbId, memberIds, db = requireDat
       });
       if (insertError) {
         console.warn(`Could not add project member ${pId}:`, insertError.message);
+        continue;
+      }
+
+      // Feature 1: Notify the newly assigned member
+      const notifTitle = "New project assigned to you";
+      const notifMessage = `New project assigned to you: ${projectName}. Assigned by: Project Coordinator. Open your dashboard to view the project details and tasks.`;
+
+      // 1. Persist notification to public.notifications
+      let notificationSaved = false;
+      try {
+        const { error: notifErr } = await db.from("notifications").insert({
+          recipient_id: pId,
+          project_id: projectDbId,
+          title: notifTitle,
+          message: notifMessage,
+          read: false,
+        });
+        if (!notifErr) notificationSaved = true;
+      } catch {
+        // Table may not yet be created in schema
+      }
+
+      // 2. Persist audit event in task_events
+      try {
+        await db.from("task_events").insert({
+          project_id: projectDbId,
+          participant_id: pId,
+          event_type: "project_assignment",
+          evidence: notifMessage,
+          analysis: {
+            title: notifTitle,
+            message: notifMessage,
+            projectName,
+            read: false,
+            fallbackNotification: !notificationSaved,
+          },
+        });
+      } catch (eventErr) {
+        console.warn(`task_events skipped for project assignment of participant ${pId}:`, eventErr.message);
+      }
+
+      // 3. Optional Telegram alert if linked
+      try {
+        const { data: participant } = await db
+          .from("participants")
+          .select("id, display_name, telegram_chat_id")
+          .eq("id", pId)
+          .maybeSingle();
+
+        if (participant?.telegram_chat_id) {
+          const sender = sendNotification || (async (chatId, text) => {
+            const { sendTelegramMessage } = await import("./telegram.js");
+            return sendTelegramMessage(chatId, text);
+          });
+          const sent = await sender(participant.telegram_chat_id, `🔔 ${notifMessage}`);
+          if (sent?.message_id) {
+            await db.from("telegram_messages").insert({
+              direction: "OUTBOUND",
+              participant_id: pId,
+              telegram_message_id: sent.message_id,
+              message_text: `🔔 ${notifMessage}`,
+              processing_status: "PROCESSED",
+            }).catch(() => null);
+          }
+        }
+      } catch (tgErr) {
+        console.warn(`Optional Telegram notification skipped for participant ${pId}:`, tgErr.message);
+        // Telegram failure is strictly non-blocking!
       }
     }
   }
 }
+
+export async function listNotifications(recipientId = null, { unreadOnly = false } = {}, db = requireDatabase()) {
+  const pDbId = recipientId ? await resolveParticipantDbId(recipientId, db) : null;
+  try {
+    let query = db.from("notifications").select("*");
+    if (pDbId != null) query = query.eq("recipient_id", pDbId);
+    if (unreadOnly) query = query.eq("read", false);
+    query = query.order("created_at", { ascending: false });
+    const { data, error } = await query;
+    if (error) throw error;
+    if (data) {
+      return data.map((n) => ({
+        id: String(n.id),
+        recipient_id: asId(n.recipient_id),
+        project_id: asId(n.project_id),
+        title: n.title,
+        message: n.message,
+        read: Boolean(n.read),
+        created_at: n.created_at,
+      }));
+    }
+  } catch {
+    // Fallback to task_events if notifications table is not queryable
+  }
+
+  // Fallback via task_events
+  try {
+    let fallbackQuery = db
+      .from("task_events")
+      .select("*")
+      .eq("event_type", "project_assignment");
+    if (pDbId != null) fallbackQuery = fallbackQuery.eq("participant_id", pDbId);
+    fallbackQuery = fallbackQuery.order("created_at", { ascending: false });
+    const { data: fbData, error: fbError } = await fallbackQuery;
+
+    if (fbError) throw fbError;
+    return (fbData || [])
+      .filter((ev) => !unreadOnly || !ev.analysis?.read)
+      .map((ev) => ({
+        id: String(ev.id),
+        recipient_id: asId(ev.participant_id),
+        project_id: asId(ev.project_id),
+        title: ev.analysis?.title || "Project Assignment",
+        message: ev.evidence || ev.analysis?.message || "New project assigned to you.",
+        read: Boolean(ev.analysis?.read),
+        created_at: ev.created_at,
+      }));
+  } catch (err) {
+    console.warn("Could not list notifications:", err.message);
+    return [];
+  }
+}
+
+export async function markNotificationRead(notificationId, recipientId = null, db = requireDatabase()) {
+  const pDbId = recipientId ? await resolveParticipantDbId(recipientId, db) : null;
+  try {
+    let query = db.from("notifications").update({ read: true }).eq("id", notificationId);
+    if (pDbId != null) query = query.eq("recipient_id", pDbId);
+    const { data, error } = await query.select();
+    if (error) throw error;
+    if (data && data.length > 0) {
+      return { id: String(data[0].id), read: true };
+    }
+  } catch {
+    // Fallback to task_events
+  }
+
+  try {
+    let updateQuery = db.from("task_events").select("analysis").eq("id", notificationId);
+    if (pDbId != null) updateQuery = updateQuery.eq("participant_id", pDbId);
+    const { data: evData } = await updateQuery.maybeSingle();
+    if (evData) {
+      const updatedAnalysis = { ...(evData.analysis || {}), read: true };
+      await db.from("task_events").update({ analysis: updatedAnalysis }).eq("id", notificationId);
+    }
+    return { id: String(notificationId), read: true };
+  } catch (err) {
+    console.warn("Could not mark notification read:", err.message);
+    return { id: String(notificationId), read: true };
+  }
+}
+
 
 export async function resolveTaskDbId(value, db = requireDatabase()) {
   if (value == null || value === "null" || value === "undefined") return null;
@@ -201,6 +365,7 @@ export async function resolveTaskDbId(value, db = requireDatabase()) {
 }
 
 async function getProjectClientId(projectDbId, db = requireDatabase()) {
+  if (projectDbId == null || projectDbId === "null" || projectDbId === "undefined") return null;
   const { data, error } = await db
     .from("projects")
     .select("client_id")
@@ -816,6 +981,9 @@ export async function recordReplyDecision({ followup, messageId, reply, analysis
   try {
     if (db.from) {
       if (taskDbId != null && dbStatus != null) {
+        if (currentTask && currentTask.owner_id != null && String(currentTask.owner_id) !== String(participantId)) {
+          throw Object.assign(new Error("Unauthorized: Task is not assigned to the participant."), { status: 403 });
+        }
         const updatePayload = {
           status: dbStatus,
           blocker: status === "BLOCKED" ? (analysis.blocker || "Blocked") : null,
@@ -824,7 +992,8 @@ export async function recordReplyDecision({ followup, messageId, reply, analysis
         const { error: taskErr } = await db
           .from("tasks")
           .update(updatePayload)
-          .eq("id", taskDbId);
+          .eq("id", taskDbId)
+          .eq("owner_id", participantId);
         if (taskErr) throw taskErr;
       }
 
@@ -1339,5 +1508,543 @@ export async function organizeProjectMeet(
     meeting_url: meetUrl,
     recipients: results,
   };
+}
+
+export function wouldCreateCycle(existingEdges, prereqId, dependentId) {
+  const pId = String(prereqId).trim();
+  const dId = String(dependentId).trim();
+  if (pId === dId) return true;
+
+  // Build adjacency list: node -> array of its downstream/dependent nodes
+  const adj = new Map();
+  for (const edge of existingEdges || []) {
+    const from = String(edge.prerequisiteTaskId ?? edge.prerequisite_task_id).trim();
+    const to = String(edge.dependentTaskId ?? edge.dependent_task_id).trim();
+    if (!from || !to) continue;
+    if (!adj.has(from)) adj.set(from, []);
+    adj.get(from).push(to);
+  }
+
+  // Adding pId -> dId creates a cycle iff there is already a path from dId to pId
+  const visited = new Set();
+  const queue = [dId];
+  while (queue.length > 0) {
+    const curr = queue.shift();
+    if (curr === pId) return true;
+    if (!visited.has(curr)) {
+      visited.add(curr);
+      const neighbors = adj.get(curr) || [];
+      for (const next of neighbors) {
+        if (!visited.has(next)) queue.push(next);
+      }
+    }
+  }
+  return false;
+}
+
+export async function analyzeAndInferProjectDependencies(projectId, { db = requireDatabase(), model = null } = {}) {
+  const projectDbId = await resolveProjectDbId(projectId, db);
+  if (!projectDbId) {
+    throw Object.assign(new Error("Project not found."), { status: 404 });
+  }
+
+  const { data: project, error: projErr } = await db
+    .from("projects")
+    .select("id, client_id, name, description, start_date, target_date, milestones")
+    .eq("id", projectDbId)
+    .single();
+  if (projErr) throw projErr;
+
+  const { data: taskRows, error: taskErr } = await db
+    .from("tasks")
+    .select("id, client_id, project_id, title, description, owner_id, status, acceptance_criteria, priority, deadline, dependencies")
+    .eq("project_id", projectDbId);
+  if (taskErr) throw taskErr;
+
+  const ownerIds = [...new Set((taskRows || []).map((t) => t.owner_id).filter(Boolean))];
+  const participantMap = new Map();
+  if (ownerIds.length > 0) {
+    const { data: pRows } = await db
+      .from("participants")
+      .select("id, display_name, role, department")
+      .in("id", ownerIds);
+    for (const p of pRows || []) {
+      participantMap.set(String(p.id), p);
+    }
+  }
+
+  const enrichedTasks = (taskRows || []).map((t) => {
+    const owner = t.owner_id ? participantMap.get(String(t.owner_id)) : null;
+    return {
+      id: asId(t.client_id ?? t.id),
+      _dbId: t.id,
+      title: t.title,
+      description: t.description || "",
+      acceptance_criteria: t.acceptance_criteria || [],
+      assigneeName: owner?.display_name || "Unassigned",
+      assigneeRole: owner?.role || "",
+      status: toApiStatus(t.status),
+      priority: t.priority,
+      deadline: t.deadline ? String(t.deadline).slice(0, 10) : "",
+      dependencies: t.dependencies || [],
+    };
+  });
+
+  let existingDeps = [];
+  try {
+    const { data: depRows, error: depErr } = await db
+      .from("task_dependencies")
+      .select("*")
+      .eq("project_id", projectDbId);
+    if (!depErr && depRows) existingDeps = depRows;
+  } catch {
+    // If task_dependencies table is not yet migrated, fall back gracefully
+  }
+
+  const taskById = new Map();
+  for (const t of taskRows || []) {
+    taskById.set(String(t.id), t);
+    if (t.client_id) taskById.set(String(t.client_id), t);
+  }
+
+  const existingMap = new Map();
+  const confirmedEdges = [];
+
+  for (const dep of existingDeps) {
+    const key = `${dep.prerequisite_task_id}->${dep.dependent_task_id}`;
+    existingMap.set(key, dep);
+    if (dep.status === "CONFIRMED") {
+      confirmedEdges.push({
+        prerequisiteTaskId: dep.prerequisite_task_id,
+        dependentTaskId: dep.dependent_task_id,
+      });
+    }
+  }
+
+  for (const t of taskRows || []) {
+    for (const prereqRef of t.dependencies || []) {
+      const prereqTask = taskById.get(String(prereqRef));
+      if (prereqTask) {
+        const key = `${prereqTask.id}->${t.id}`;
+        if (!existingMap.has(key)) {
+          confirmedEdges.push({
+            prerequisiteTaskId: prereqTask.id,
+            dependentTaskId: t.id,
+          });
+        }
+      }
+    }
+  }
+
+  const aiResult = await inferDependenciesWithAI(project, enrichedTasks, { model });
+
+  const validatedEdges = [];
+  const candidateGraphEdges = [...confirmedEdges];
+
+  for (const proposed of aiResult.dependencies || []) {
+    const prereqTask = taskById.get(String(proposed.prerequisiteTaskId));
+    const depTask = taskById.get(String(proposed.dependentTaskId));
+
+    if (!prereqTask || !depTask) continue;
+    if (prereqTask.project_id !== projectDbId || depTask.project_id !== projectDbId) continue;
+
+    const prereqDbId = prereqTask.id;
+    const depDbId = depTask.id;
+
+    if (prereqDbId === depDbId) continue;
+
+    const key = `${prereqDbId}->${depDbId}`;
+    const existing = existingMap.get(key);
+
+    if (existing && existing.status === "CONFIRMED") {
+      continue;
+    }
+    if (existing && existing.status === "REJECTED") {
+      continue;
+    }
+
+    if (wouldCreateCycle(candidateGraphEdges, prereqDbId, depDbId)) {
+      console.warn(`Rejected circular dependency proposal: ${prereqTask.title} -> ${depTask.title}`);
+      continue;
+    }
+
+    candidateGraphEdges.push({
+      prerequisiteTaskId: prereqDbId,
+      dependentTaskId: depDbId,
+    });
+
+    validatedEdges.push({
+      project_id: projectDbId,
+      prerequisite_task_id: prereqDbId,
+      dependent_task_id: depDbId,
+      confidence: Math.max(0, Math.min(1, Number(proposed.confidence) || 0.85)),
+      explanation: proposed.explanation || "AI-inferred dependency based on deliverables and architectural requirements.",
+      evidence: proposed.evidence || "",
+      status: "PROPOSED",
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  if (validatedEdges.length > 0) {
+    try {
+      await db.from("task_dependencies").upsert(validatedEdges, {
+        onConflict: "project_id,prerequisite_task_id,dependent_task_id",
+        ignoreDuplicates: false,
+      });
+    } catch (saveErr) {
+      console.warn("Could not upsert to task_dependencies (table may need migration):", saveErr.message);
+    }
+  }
+
+  try {
+    await db.from("task_events").insert({
+      project_id: projectDbId,
+      event_type: "dependency_analysis",
+      evidence: `AI dependency analysis completed. ${validatedEdges.length} dependencies proposed.`,
+      analysis: {
+        proposedCount: validatedEdges.length,
+        summary: aiResult.summary,
+        independentTaskIds: aiResult.independentTaskIds,
+        proposedEdges: validatedEdges,
+      },
+    });
+  } catch (err) {
+    console.warn("task_events dependency_analysis insert warning:", err?.message);
+  }
+
+  const allDependencies = await listProjectDependencies(projectId, db);
+
+  return {
+    dependencies: allDependencies,
+    independentTaskIds: aiResult.independentTaskIds || [],
+    summary: aiResult.summary || `Analysis completed for project ${project.name}.`,
+  };
+}
+
+export async function listProjectDependencies(projectId, db = requireDatabase()) {
+  const projectDbId = await resolveProjectDbId(projectId, db);
+  if (!projectDbId) return [];
+
+  const { data: tasks, error: tErr } = await db
+    .from("tasks")
+    .select("id, client_id, title, owner_id, status, deadline, dependencies, created_at, updated_at")
+    .eq("project_id", projectDbId);
+  if (tErr) throw tErr;
+
+  const taskMap = new Map();
+  for (const t of tasks || []) {
+    taskMap.set(String(t.id), t);
+    if (t.client_id) taskMap.set(String(t.client_id), t);
+  }
+
+  let dbDependencies = [];
+  try {
+    const { data: depRows, error: depErr } = await db
+      .from("task_dependencies")
+      .select("*")
+      .eq("project_id", projectDbId)
+      .order("created_at", { ascending: true });
+    if (!depErr && depRows && depRows.length > 0) {
+      dbDependencies = depRows;
+    }
+  } catch {
+    // If table does not exist yet
+  }
+
+  // Fallback: If task_dependencies table is not present, retrieve the latest proposed edges from task_events
+  if (dbDependencies.length === 0) {
+    try {
+      const { data: latestEvent } = await db
+        .from("task_events")
+        .select("analysis, created_at")
+        .eq("project_id", projectDbId)
+        .eq("event_type", "dependency_analysis")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const { data: rejectedEvents } = await db
+        .from("task_events")
+        .select("analysis")
+        .eq("project_id", projectDbId)
+        .eq("event_type", "dependency_rejected")
+        .limit(50);
+
+      const rejectedKeys = new Set(
+        (rejectedEvents || [])
+          .map((e) => e?.analysis ? `${e.analysis.prerequisiteTaskId}->${e.analysis.dependentTaskId}` : null)
+          .filter(Boolean)
+      );
+
+      if (latestEvent?.analysis?.proposedEdges) {
+        dbDependencies = latestEvent.analysis.proposedEdges
+          .filter((e) => !rejectedKeys.has(`${e.prerequisite_task_id}->${e.dependent_task_id}`))
+          .map((e) => ({
+            id: `prop-${e.prerequisite_task_id}-${e.dependent_task_id}`,
+            project_id: projectDbId,
+            prerequisite_task_id: e.prerequisite_task_id,
+            dependent_task_id: e.dependent_task_id,
+            confidence: e.confidence,
+            explanation: e.explanation,
+            evidence: e.evidence,
+            status: "PROPOSED",
+            created_at: latestEvent.created_at || new Date().toISOString(),
+            updated_at: latestEvent.created_at || new Date().toISOString(),
+          }));
+      }
+    } catch (fallbackErr) {
+      console.warn("task_events dependency fallback read warning:", fallbackErr?.message);
+    }
+  }
+
+  const result = [];
+  const seenPairs = new Set();
+
+  for (const dep of dbDependencies) {
+    const prereq = taskMap.get(String(dep.prerequisite_task_id));
+    const downstream = taskMap.get(String(dep.dependent_task_id));
+    const prereqId = prereq ? asId(prereq.client_id ?? prereq.id) : String(dep.prerequisite_task_id);
+    const depId = downstream ? asId(downstream.client_id ?? downstream.id) : String(dep.dependent_task_id);
+    const pairKey = `${prereqId}->${depId}`;
+    seenPairs.add(pairKey);
+
+    result.push({
+      id: String(dep.id),
+      projectId: asId(projectId),
+      prerequisiteTaskId: prereqId,
+      prerequisiteTitle: prereq?.title || "Prerequisite Task",
+      prerequisiteStatus: prereq ? fromDbStatus(prereq.status) : "Pending",
+      prerequisiteDeadline: prereq?.deadline ? String(prereq.deadline).slice(0, 10) : "",
+      dependentTaskId: depId,
+      dependentTitle: downstream?.title || "Dependent Task",
+      dependentStatus: downstream ? fromDbStatus(downstream.status) : "Pending",
+      dependentDeadline: downstream?.deadline ? String(downstream.deadline).slice(0, 10) : "",
+      confidence: Number(dep.confidence) || 0.85,
+      explanation: dep.explanation || "",
+      evidence: dep.evidence || "",
+      status: dep.status,
+      createdAt: dep.created_at,
+      updatedAt: dep.updated_at,
+    });
+  }
+
+  for (const downstream of tasks || []) {
+    const downstreamId = asId(downstream.client_id ?? downstream.id);
+    for (const prereqRef of downstream.dependencies || []) {
+      const prereq = taskMap.get(String(prereqRef));
+      const prereqId = prereq ? asId(prereq.client_id ?? prereq.id) : String(prereqRef);
+      const pairKey = `${prereqId}->${downstreamId}`;
+      if (!seenPairs.has(pairKey)) {
+        seenPairs.add(pairKey);
+        result.push({
+          id: `dep-${prereqId}-${downstreamId}`,
+          projectId: asId(projectId),
+          prerequisiteTaskId: prereqId,
+          prerequisiteTitle: prereq?.title || "Prerequisite Task",
+          prerequisiteStatus: prereq ? fromDbStatus(prereq.status) : "Pending",
+          prerequisiteDeadline: prereq?.deadline ? String(prereq.deadline).slice(0, 10) : "",
+          dependentTaskId: downstreamId,
+          dependentTitle: downstream.title,
+          dependentStatus: fromDbStatus(downstream.status),
+          dependentDeadline: downstream.deadline ? String(downstream.deadline).slice(0, 10) : "",
+          confidence: 1.0,
+          explanation: "Manager confirmed task dependency.",
+          evidence: "Configured directly in task dependencies.",
+          status: "CONFIRMED",
+          createdAt: downstream.created_at,
+          updatedAt: downstream.updated_at,
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+export async function confirmProjectDependency(projectId, { prerequisiteTaskId, dependentTaskId }, db = requireDatabase()) {
+  const projectDbId = await resolveProjectDbId(projectId, db);
+  if (!projectDbId) throw Object.assign(new Error("Project not found."), { status: 404 });
+
+  const prereqId = await resolveTaskDbId(prerequisiteTaskId, db);
+  const depId = await resolveTaskDbId(dependentTaskId, db);
+  if (!prereqId || !depId) throw Object.assign(new Error("Task not found."), { status: 404 });
+  if (prereqId === depId) throw Object.assign(new Error("A task cannot depend on itself."), { status: 400 });
+
+  const { data: tasks, error: tErr } = await db
+    .from("tasks")
+    .select("id, client_id, project_id, title, dependencies")
+    .in("id", [prereqId, depId]);
+  if (tErr) throw tErr;
+  if (!tasks || tasks.length < 2) throw Object.assign(new Error("Both tasks must belong to the project."), { status: 400 });
+  if (tasks.some((t) => t.project_id !== projectDbId)) {
+    throw Object.assign(new Error("Cross-project dependencies are not allowed."), { status: 400 });
+  }
+
+  const prereqTask = tasks.find((t) => t.id === prereqId);
+  const depTask = tasks.find((t) => t.id === depId);
+
+  const currentDeps = await listProjectDependencies(projectId, db);
+  const confirmedDeps = currentDeps.filter((d) => d.status === "CONFIRMED");
+  if (wouldCreateCycle(confirmedDeps, prereqId, depId)) {
+    throw Object.assign(new Error("Confirming this dependency would create a circular dependency chain."), { status: 400 });
+  }
+
+  let savedRecord = null;
+  try {
+    const { data: updated, error: upErr } = await db
+      .from("task_dependencies")
+      .upsert({
+        project_id: projectDbId,
+        prerequisite_task_id: prereqId,
+        dependent_task_id: depId,
+        status: "CONFIRMED",
+        updated_at: new Date().toISOString(),
+      }, {
+        onConflict: "project_id,prerequisite_task_id,dependent_task_id",
+      })
+      .select()
+      .single();
+    if (!upErr && updated) savedRecord = updated;
+  } catch (err) {
+    console.warn("task_dependencies upsert failed:", err.message);
+  }
+
+  const currentDependencies = depTask.dependencies || [];
+  const prereqRef = prereqTask.client_id || String(prereqTask.id);
+  if (!currentDependencies.includes(prereqRef) && !currentDependencies.includes(String(prereqTask.id))) {
+    const updatedDependencies = [...currentDependencies, prereqRef];
+    await db
+      .from("tasks")
+      .update({ dependencies: updatedDependencies, updated_at: new Date().toISOString() })
+      .eq("id", depId);
+  }
+
+  try {
+    await db.from("task_events").insert({
+      project_id: projectDbId,
+      task_id: depId,
+      event_type: "dependency_confirmed",
+      evidence: `Dependency confirmed: '${prereqTask.title}' -> '${depTask.title}'`,
+      analysis: {
+        prerequisiteTaskId: prereqRef,
+        prerequisiteTitle: prereqTask.title,
+        dependentTaskId: depTask.client_id || String(depTask.id),
+        dependentTitle: depTask.title,
+      },
+    });
+  } catch {
+    // Non-fatal
+  }
+
+  return {
+    id: savedRecord?.id ?? `dep-${prereqId}-${depId}`,
+    projectId: asId(projectId),
+    prerequisiteTaskId: prereqRef,
+    prerequisiteTitle: prereqTask.title,
+    dependentTaskId: depTask.client_id || String(depTask.id),
+    dependentTitle: depTask.title,
+    status: "CONFIRMED",
+  };
+}
+
+export async function rejectProjectDependency(projectId, { prerequisiteTaskId, dependentTaskId }, db = requireDatabase()) {
+  const projectDbId = await resolveProjectDbId(projectId, db);
+  if (!projectDbId) throw Object.assign(new Error("Project not found."), { status: 404 });
+
+  const prereqId = await resolveTaskDbId(prerequisiteTaskId, db);
+  const depId = await resolveTaskDbId(dependentTaskId, db);
+  if (!prereqId || !depId) throw Object.assign(new Error("Task not found."), { status: 404 });
+
+  const { data: tasks } = await db
+    .from("tasks")
+    .select("id, client_id, title, dependencies")
+    .in("id", [prereqId, depId]);
+  const prereqTask = tasks?.find((t) => t.id === prereqId);
+  const depTask = tasks?.find((t) => t.id === depId);
+
+  try {
+    await db
+      .from("task_dependencies")
+      .update({ status: "REJECTED", updated_at: new Date().toISOString() })
+      .eq("project_id", projectDbId)
+      .eq("prerequisite_task_id", prereqId)
+      .eq("dependent_task_id", depId);
+  } catch (err) {
+    console.warn("task_dependencies update failed:", err.message);
+  }
+
+  if (depTask) {
+    const prereqRef1 = prereqTask?.client_id;
+    const prereqRef2 = String(prereqId);
+    const updated = (depTask.dependencies || []).filter((d) => d !== prereqRef1 && d !== prereqRef2);
+    if (updated.length !== (depTask.dependencies || []).length) {
+      await db
+        .from("tasks")
+        .update({ dependencies: updated, updated_at: new Date().toISOString() })
+        .eq("id", depId);
+    }
+  }
+
+  try {
+    await db.from("task_events").insert({
+      project_id: projectDbId,
+      task_id: depId,
+      event_type: "dependency_rejected",
+      evidence: `Dependency rejected: '${prereqTask?.title || prereqId}' -> '${depTask?.title || depId}'`,
+      analysis: {
+        prerequisiteTaskId: prereqId,
+        dependentTaskId: depId,
+      },
+    });
+  } catch {
+    // Non-fatal
+  }
+
+  return {
+    projectId: asId(projectId),
+    prerequisiteTaskId,
+    dependentTaskId,
+    status: "REJECTED",
+  };
+}
+
+export async function deleteProjectDependency(projectId, { prerequisiteTaskId, dependentTaskId }, db = requireDatabase()) {
+  const projectDbId = await resolveProjectDbId(projectId, db);
+  if (!projectDbId) throw Object.assign(new Error("Project not found."), { status: 404 });
+
+  const prereqId = await resolveTaskDbId(prerequisiteTaskId, db);
+  const depId = await resolveTaskDbId(dependentTaskId, db);
+  if (!prereqId || !depId) return { success: true };
+
+  try {
+    await db
+      .from("task_dependencies")
+      .delete()
+      .eq("project_id", projectDbId)
+      .eq("prerequisite_task_id", prereqId)
+      .eq("dependent_task_id", depId);
+  } catch {
+    // Non-fatal
+  }
+
+  const { data: depTask } = await db
+    .from("tasks")
+    .select("id, client_id, dependencies")
+    .eq("id", depId)
+    .maybeSingle();
+
+  if (depTask) {
+    const prereqRef = String(prerequisiteTaskId);
+    const prereqDbRef = String(prereqId);
+    const updated = (depTask.dependencies || []).filter((d) => d !== prereqRef && d !== prereqDbRef);
+    if (updated.length !== (depTask.dependencies || []).length) {
+      await db
+        .from("tasks")
+        .update({ dependencies: updated, updated_at: new Date().toISOString() })
+        .eq("id", depId);
+    }
+  }
+
+  return { success: true };
 }
 

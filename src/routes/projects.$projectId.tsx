@@ -1,6 +1,21 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
-import { ArrowLeft, Pencil, Plus, CheckCircle2, Circle, MessageSquare, Video } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  ArrowLeft,
+  Pencil,
+  Plus,
+  CheckCircle2,
+  Circle,
+  MessageSquare,
+  Video,
+  ArrowRight,
+  Sparkles,
+  XCircle,
+  Loader2,
+  ShieldAlert,
+  Layers,
+  GitBranch,
+} from "lucide-react";
 import { useLookup, useStore } from "@/lib/store";
 import { evaluateRisks, projectHealth, projectStats } from "@/lib/rules";
 import { PageHeader, Panel, Stat, Empty } from "@/components/pp/page";
@@ -10,6 +25,7 @@ import { ActivityList } from "@/components/pp/activity-list";
 import { ProjectDialog } from "@/components/pp/project-dialog";
 import { OrganizeMeetDialog } from "@/components/pp/organize-meet-dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 
 export const Route = createFileRoute("/projects/$projectId")({
   head: () => ({
@@ -27,7 +43,16 @@ export const Route = createFileRoute("/projects/$projectId")({
 
 function ProjectDetail() {
   const { projectId } = Route.useParams();
-  const { data, openTaskDialog, setSelectedProjectId, setOpenTaskId } = useStore();
+  const {
+    data,
+    openTaskDialog,
+    setSelectedProjectId,
+    setOpenTaskId,
+    isAnalyzingDependencies,
+    analyzeProjectDependencies,
+    confirmDependency,
+    rejectDependency,
+  } = useStore();
   const { member, task } = useLookup();
   const [edit, setEdit] = useState(false);
   const [meetOpen, setMeetOpen] = useState(false);
@@ -36,6 +61,43 @@ function ProjectDetail() {
   const tasks = data.tasks.filter((t) => t.projectId === p.id);
   const s = projectStats(data, p.id);
   const risks = evaluateRisks(tasks);
+
+  // Automatically analyze dependencies in real-time when project/tasks exist but have no graph yet
+  useEffect(() => {
+    if (tasks.length > 1 && (data.taskDependencies || []).filter((d) => d.projectId === p.id).length === 0) {
+      void analyzeProjectDependencies(p.id, { silent: true });
+    }
+  }, [p.id, tasks.length]);
+
+  const taskIds = new Set(tasks.map((t) => t.id));
+
+  // Confirmed dependencies
+  const confirmedDeps = tasks.flatMap((t) =>
+    (t.dependsOn || []).map((prereqId) => {
+      const prereq = data.tasks.find((pt) => pt.id === prereqId);
+      return {
+        prerequisiteId: prereqId,
+        prerequisiteTitle: prereq?.title || "Prerequisite Task",
+        prerequisiteStatus: prereq?.status || "Pending",
+        prerequisiteAssignee: member(prereq?.ownerId || "")?.name || "Unassigned",
+        prerequisiteDeadline: prereq?.deadline || "",
+        dependentId: t.id,
+        dependentTitle: t.title,
+        dependentStatus: t.status,
+        dependentAssignee: member(t.ownerId)?.name || "Unassigned",
+        dependentDeadline: t.deadline,
+        isBlocked: prereq?.status === "Blocked",
+        isOverdue: prereq?.status !== "Complete" && !!prereq?.deadline && prereq.deadline < new Date().toISOString().slice(0, 10),
+      };
+    }),
+  );
+
+  // AI Proposed dependencies for this project
+  const proposedDeps = (data.taskDependencies || []).filter(
+    (dep) =>
+      dep.status === "PROPOSED" &&
+      (dep.projectId === p.id || taskIds.has(dep.prerequisiteTaskId) || taskIds.has(dep.dependentTaskId)),
+  );
 
   return (
     <>
@@ -59,6 +121,151 @@ function ProjectDetail() {
         <Stat label="Blocked" value={s.blocked} tone={s.blocked ? "danger" : undefined} />
         <Stat label="Overdue" value={s.overdue} tone={s.overdue ? "warn" : undefined} />
       </div>
+
+      {/* Real-time Project Dependency Flow Panel */}
+      <Panel
+        title="Real-Time Dependency Analysis & Milestone Flow"
+        className="mt-6"
+        action={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void analyzeProjectDependencies(p.id)}
+              disabled={isAnalyzingDependencies}
+              className="h-7 text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 shadow-xs"
+            >
+              {isAnalyzingDependencies ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-primary" />}
+              <span>{isAnalyzingDependencies ? "Analyzing..." : "Re-analyze Flow"}</span>
+            </Button>
+            <Link to="/dependencies" className="text-xs text-primary hover:underline flex items-center gap-1 font-medium ml-1">
+              Full Graph <ArrowRight className="h-3 w-3" />
+            </Link>
+          </div>
+        }
+      >
+        {/* Milestone Timeline Strip */}
+        {p.milestones.length > 0 && (
+          <div className="mb-4 rounded-lg bg-muted/40 p-3 border">
+            <div className="text-xs font-semibold text-foreground mb-2 flex items-center gap-1.5">
+              <Layers className="h-3.5 w-3.5 text-primary" />
+              <span>Project Milestones Sequence ({p.milestones.length})</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {p.milestones.map((m, idx) => (
+                <div key={m.id} className="flex items-center gap-1.5">
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-medium ${m.done ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30" : "bg-card text-foreground"}`}>
+                    {m.done ? <CheckCircle2 className="h-3 w-3 text-emerald-600" /> : <Circle className="h-3 w-3 text-muted-foreground" />}
+                    <span>{m.name || `Phase ${idx + 1}`}</span>
+                    {m.date && <span className="text-[10px] text-muted-foreground ml-0.5">({m.date})</span>}
+                  </span>
+                  {idx < p.milestones.length - 1 && <ArrowRight className="h-3 w-3 text-muted-foreground/60" />}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* AI Proposed Dependencies (Pending Review) */}
+        {proposedDeps.length > 0 && (
+          <div className="mb-4 space-y-2">
+            <div className="flex items-center justify-between text-xs font-semibold text-purple-700 dark:text-purple-300">
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="h-3.5 w-3.5" />
+                <span>AI Proposed Dependencies ({proposedDeps.length} pending review)</span>
+              </div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {proposedDeps.map((dep) => (
+                <div key={dep.id} className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-1 text-xs">
+                    <span className="font-semibold text-foreground truncate">{dep.prerequisiteTitle || dep.prerequisiteTaskId}</span>
+                    <ArrowRight className="h-3 w-3 text-purple-500 shrink-0" />
+                    <span className="font-semibold text-foreground truncate">{dep.dependentTitle || dep.dependentTaskId}</span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground line-clamp-2 leading-relaxed">{dep.explanation}</p>
+                  <div className="flex items-center justify-between pt-1 border-t border-purple-500/15">
+                    <span className="text-[10px] text-purple-600 dark:text-purple-400 font-medium">
+                      Confidence: {Math.round(dep.confidence * 100)}%
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void rejectDependency(dep.prerequisiteTaskId, dep.dependentTaskId)}
+                        className="h-6 px-2 text-[11px] text-destructive hover:bg-destructive/10"
+                      >
+                        <XCircle className="h-3 w-3 mr-1" /> Reject
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => void confirmDependency(dep.prerequisiteTaskId, dep.dependentTaskId)}
+                        className="h-6 px-2 text-[11px] bg-purple-600 hover:bg-purple-700 text-white"
+                      >
+                        <CheckCircle2 className="h-3 w-3 mr-1" /> Confirm
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Confirmed Task Dependency Pipeline */}
+        {confirmedDeps.length > 0 ? (
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+              <GitBranch className="h-3.5 w-3.5 text-emerald-500" />
+              <span>Active Dependency Flow ({confirmedDeps.length})</span>
+            </div>
+            <div className="divide-y rounded-lg border bg-card/60">
+              {confirmedDeps.map((d, i) => (
+                <div key={i} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 text-xs hover:bg-muted/30 transition-all">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <div className="min-w-0">
+                      <div className="font-medium text-foreground truncate">{d.prerequisiteTitle}</div>
+                      <div className="text-[11px] text-muted-foreground">{d.prerequisiteAssignee} {d.prerequisiteDeadline && `· Due ${d.prerequisiteDeadline}`}</div>
+                    </div>
+                    <StatusBadge status={d.prerequisiteStatus} />
+                    <ArrowRight className="h-3.5 w-3.5 text-muted-foreground shrink-0 mx-1" />
+                    <div className="min-w-0">
+                      <div className="font-medium text-foreground truncate">{d.dependentTitle}</div>
+                      <div className="text-[11px] text-muted-foreground">{d.dependentAssignee} {d.dependentDeadline && `· Due ${d.dependentDeadline}`}</div>
+                    </div>
+                    <StatusBadge status={d.dependentStatus} />
+                  </div>
+                  {d.isBlocked && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-destructive bg-destructive/10 border border-destructive/20 px-2 py-0.5 rounded shrink-0">
+                      <ShieldAlert className="h-3 w-3" /> Upstream Blocked!
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : proposedDeps.length === 0 ? (
+          <div className="py-4 text-center text-xs text-muted-foreground">
+            {tasks.length <= 1 ? (
+              <p>Add at least two tasks to infer and visualize logical prerequisite dependencies.</p>
+            ) : (
+              <div className="space-y-1.5">
+                <p>No active dependencies yet.</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void analyzeProjectDependencies(p.id)}
+                  disabled={isAnalyzingDependencies}
+                  className="h-7 text-xs gap-1"
+                >
+                  <Sparkles className="h-3 w-3 text-primary" /> Auto-Analyze Dependencies Now
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : null}
+      </Panel>
+
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
         <Panel title={`Tasks (${tasks.length})`} className="lg:col-span-2"><TaskRows tasks={tasks} /></Panel>
         <div className="space-y-4">
